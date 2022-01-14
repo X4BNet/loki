@@ -1904,6 +1904,11 @@ fifocache:
   # The default value of 0 disables expiration.
   # CLI flag: -<prefix>.fifocache.duration
   [validity: <duration>]
+
+  # The time to live for items in the cache before they get purged.
+  # The value of 0 disables auto-expiration.
+  # CLI flag: -<prefix>.fifocache.ttl
+  [ttl: <duration> | default = 1h]
 ```
 
 ## schema_config

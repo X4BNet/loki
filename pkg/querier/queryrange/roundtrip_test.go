@@ -42,7 +42,7 @@ var (
 				EnableFifoCache: true,
 				Fifocache: cache.FifoCacheConfig{
 					MaxSizeItems: 1024,
-					Validity:     24 * time.Hour,
+					TTL:          24 * time.Hour,
 				},
 			},
 		},

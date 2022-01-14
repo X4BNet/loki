@@ -32,18 +32,22 @@ const (
 type FifoCacheConfig struct {
 	MaxSizeBytes string        `yaml:"max_size_bytes"`
 	MaxSizeItems int           `yaml:"max_size_items"`
-	Validity     time.Duration `yaml:"validity"`
+	TTL          time.Duration `yaml:"ttl"`
 
-	DeprecatedSize int `yaml:"size"`
+	DeprecatedValidity time.Duration `yaml:"validity"`
+	DeprecatedSize     int           `yaml:"size"`
+
+	PurgeInterval time.Duration
 }
 
 // RegisterFlagsWithPrefix adds the flags required to config this to the given FlagSet
 func (cfg *FifoCacheConfig) RegisterFlagsWithPrefix(prefix, description string, f *flag.FlagSet) {
 	f.StringVar(&cfg.MaxSizeBytes, prefix+"fifocache.max-size-bytes", "1GB", description+"Maximum memory size of the cache in bytes. A unit suffix (KB, MB, GB) may be applied.")
 	f.IntVar(&cfg.MaxSizeItems, prefix+"fifocache.max-size-items", 0, description+"Maximum number of entries in the cache.")
-	f.DurationVar(&cfg.Validity, prefix+"fifocache.duration", time.Hour, description+"The expiry duration for the cache.")
+	f.DurationVar(&cfg.TTL, prefix+"fifocache.ttl", time.Hour, description+"The time to live for items in the cache before they get purged.")
 
-	f.IntVar(&cfg.DeprecatedSize, prefix+"fifocache.size", 0, "Deprecated (use max-size-items or max-size-bytes instead): "+description+"The number of entries to cache. ")
+	f.DurationVar(&cfg.DeprecatedValidity, prefix+"fifocache.duration", 0, "Deprecated (use ttl instead): "+description+"The expiry duration for the cache.")
+	f.IntVar(&cfg.DeprecatedSize, prefix+"fifocache.size", 0, "Deprecated (use max-size-items or max-size-bytes instead): "+description+"The number of entries to cache.")
 }
 
 func (cfg *FifoCacheConfig) Validate() error {
@@ -73,12 +77,16 @@ type FifoCache struct {
 	entries map[string]*list.Element
 	lru     *list.List
 
+	done   chan struct{}
+	ticker *time.Ticker
+
 	entriesAdded    prometheus.Counter
 	entriesAddedNew prometheus.Counter
 	entriesEvicted  prometheus.Counter
 	entriesCurrent  prometheus.Gauge
 	totalGets       prometheus.Counter
 	totalMisses     prometheus.Counter
+	staleGets       prometheus.Counter
 	memoryBytes     prometheus.Gauge
 }
 
@@ -104,11 +112,27 @@ func NewFifoCache(name string, cfg FifoCacheConfig, reg prometheus.Registerer, l
 		level.Warn(logger).Log("msg", "neither fifocache.max-size-bytes nor fifocache.max-size-items is set", "cache", name)
 		return nil
 	}
-	return &FifoCache{
+
+	if cfg.DeprecatedValidity > 0 {
+		flagext.DeprecatedFlagsUsed.Inc()
+		level.Warn(logger).Log("msg", "running with DEPRECATED flag fifocache.interval, use fifocache.ttl instead", "cache", name)
+		cfg.TTL = cfg.DeprecatedValidity
+	}
+
+	// Set a default interval for the ticker
+	// This can be overwritten to a smaller value in tests
+	if cfg.PurgeInterval == 0 {
+		cfg.PurgeInterval = 1 * time.Minute
+	}
+
+	cache := &FifoCache{
 		maxSizeItems: cfg.MaxSizeItems,
 		maxSizeBytes: maxSizeBytes,
 		entries:      make(map[string]*list.Element),
 		lru:          list.New(),
+
+		done:   make(chan struct{}),
+		ticker: time.NewTicker(cfg.PurgeInterval),
 
 		entriesAdded: promauto.With(reg).NewCounter(prometheus.CounterOpts{
 			Namespace:   "querier",
@@ -158,6 +182,14 @@ func NewFifoCache(name string, cfg FifoCacheConfig, reg prometheus.Registerer, l
 			ConstLabels: prometheus.Labels{"cache": name},
 		}),
 
+		staleGets: promauto.With(reg).NewCounter(prometheus.CounterOpts{
+			Namespace:   "querier",
+			Subsystem:   "cache",
+			Name:        "stale_gets_total",
+			Help:        "The total number of Get calls that had an entry which expired (deprecated)",
+			ConstLabels: prometheus.Labels{"cache": name},
+		}),
+
 		memoryBytes: promauto.With(reg).NewGauge(prometheus.GaugeOpts{
 			Namespace:   "querier",
 			Subsystem:   "cache",
@@ -165,6 +197,40 @@ func NewFifoCache(name string, cfg FifoCacheConfig, reg prometheus.Registerer, l
 			Help:        "The current cache size in bytes",
 			ConstLabels: prometheus.Labels{"cache": name},
 		}),
+	}
+
+	if cfg.TTL > 0 {
+		go runPruneJob(cache, cfg.TTL)
+	}
+
+	return cache
+}
+
+func runPruneJob(c *FifoCache, ttl time.Duration) {
+	for {
+		select {
+		case <-c.done:
+			return
+		case t := <-c.ticker.C:
+			c.pruneExpiredItems(t, ttl)
+		}
+	}
+}
+
+// pruneExpiredItems prunes items in the cache that exceeded their ttl
+func (c *FifoCache) pruneExpiredItems(t time.Time, ttl time.Duration) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	for k, v := range c.entries {
+		entry := v.Value.(*cacheEntry)
+		if t.Sub(entry.updated) > ttl {
+			_ = c.lru.Remove(v).(*cacheEntry)
+			delete(c.entries, k)
+			c.currSizeBytes -= sizeOf(entry)
+			c.entriesCurrent.Dec()
+			c.entriesEvicted.Inc()
+		}
 	}
 }
 
@@ -200,6 +266,9 @@ func (c *FifoCache) Store(ctx context.Context, keys []string, values [][]byte) {
 func (c *FifoCache) Stop() {
 	c.lock.Lock()
 	defer c.lock.Unlock()
+
+	close(c.done)
+	c.ticker.Stop()
 
 	c.entriesEvicted.Add(float64(c.lru.Len()))
 
