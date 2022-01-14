@@ -160,7 +160,7 @@ func TestFifoCacheEviction(t *testing.T) {
 
 func TestFifoCacheExpiry(t *testing.T) {
 	key1, key2, key3, key4 := "01", "02", "03", "04"
-	data1, data2, data3, data4 := genBytes(32), genBytes(32), genBytes(32), genBytes(32)
+	data1, data2, data3, data4 := genBytes(32), genBytes(64), genBytes(128), genBytes(32)
 
 	memorySz := sizeOf(&cacheEntry{key: key1, value: data1}) +
 		sizeOf(&cacheEntry{key: key2, value: data2}) +
