@@ -746,8 +746,10 @@ func (c *MemChunk) cut() error {
 		return err
 	}
 
-	// syscall.MADV_PAGEOUT is not defined
-	unix.Madvise(b, 21)
+	if len(b) >= 8192 {
+		// syscall.MADV_PAGEOUT is not defined
+		unix.Madvise(b, 21)
+	}
 
 	mint, maxt := c.head.Bounds()
 	c.blocks = append(c.blocks, block{
