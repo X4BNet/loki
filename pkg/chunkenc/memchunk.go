@@ -24,6 +24,7 @@ import (
 	"github.com/grafana/loki/pkg/logqlmodel/stats"
 	"github.com/grafana/loki/pkg/storage/chunk/encoding"
 	util_log "github.com/grafana/loki/pkg/util/log"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -744,6 +745,9 @@ func (c *MemChunk) cut() error {
 	if err != nil {
 		return err
 	}
+
+	// syscall.MADV_PAGEOUT is not defined
+	unix.Madvise(b, 21)
 
 	mint, maxt := c.head.Bounds()
 	c.blocks = append(c.blocks, block{
