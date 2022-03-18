@@ -10,6 +10,7 @@ import (
 	"hash/crc32"
 	"io"
 	"reflect"
+	"runtime"
 	"time"
 	"unsafe"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/grafana/loki/pkg/logqlmodel/stats"
 	"github.com/grafana/loki/pkg/storage/chunk/encoding"
 	util_log "github.com/grafana/loki/pkg/util/log"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -107,7 +109,7 @@ type MemChunk struct {
 	minTime time.Duration
 
 	// The finished blocks.
-	blocks []block
+	blocks []*block
 	// The compressed size of all the blocks
 	cutBlockSize int
 
@@ -393,10 +395,10 @@ func NewByteChunk(b []byte, blockSize, targetSize int, maxSize int, minTime time
 
 	// Read the number of blocks.
 	num := db.uvarint()
-	bc.blocks = make([]block, 0, num)
+	bc.blocks = make([]*block, 0, num)
 
 	for i := 0; i < num; i++ {
-		var blk block
+		blk := &block{}
 		// Read #entries.
 		blk.numEntries = db.uvarint()
 
@@ -662,6 +664,10 @@ func (c *MemChunk) UncompressedSize() int {
 	return size
 }
 
+func (c *MemChunk) HeadSize() int {
+	return c.head.UncompressedSize()
+}
+
 // CompressedSize implements Chunk.
 func (c *MemChunk) CompressedSize() int {
 	size := 0
@@ -695,7 +701,7 @@ func (c *MemChunk) Append(entry *logproto.Entry) error {
 	}
 
 	if c.head.UncompressedSize() >= c.blockSize {
-		return c.cut()
+		return c.Cut()
 	}
 
 	return nil
@@ -704,7 +710,7 @@ func (c *MemChunk) Append(entry *logproto.Entry) error {
 // Close implements Chunk.
 // TODO: Fix this to check edge cases.
 func (c *MemChunk) Close() error {
-	if err := c.cut(); err != nil {
+	if err := c.Cut(); err != nil {
 		return err
 	}
 	return c.reorder()
@@ -759,26 +765,40 @@ func finalizeBlock(b *block) {
 }
 
 // cut a new block and add it to finished blocks.
-func (c *MemChunk) cut() error {
+func (c *MemChunk) Cut() error {
 	if c.head.IsEmpty() {
 		return nil
 	}
 
-	b, err := c.head.Serialise(getWriterPool(c.encoding))
+	buffer, err := c.head.Serialise(getWriterPool(c.encoding))
 	if err != nil {
 		return err
 	}
 
+	buffer2, err := MmapAlloc(len(buffer))
+	if err != nil {
+		return err
+	}
+	copy(buffer2, buffer)
+
+	// mmap must allocate at-least one page
+	// syscall.MADV_PAGEOUT is not defined
+	unix.Madvise(buffer2, 21)
+
 	mint, maxt := c.head.Bounds()
-	c.blocks = append(c.blocks, block{
-		b:                b,
+	blk := &block{
+		b:                buffer2,
 		numEntries:       c.head.Entries(),
 		mint:             mint,
 		maxt:             maxt,
 		uncompressedSize: c.head.UncompressedSize(),
-	})
+	}
 
-	c.cutBlockSize += len(b)
+	runtime.SetFinalizer(blk, finalizeBlock)
+
+	c.blocks = append(c.blocks, blk)
+
+	c.cutBlockSize += len(buffer)
 
 	c.head.Reset()
 	return nil
@@ -977,21 +997,21 @@ func (c *MemChunk) Rebound(start, end time.Time) (Chunk, error) {
 // chances of chunk<>block encoding drift in the codebase as the latter is parameterized by the former.
 type encBlock struct {
 	enc Encoding
-	block
+	*block
 }
 
 func (b encBlock) Iterator(ctx context.Context, pipeline log.StreamPipeline) iter.EntryIterator {
 	if len(b.b) == 0 {
 		return iter.NoopIterator
 	}
-	return newEntryIterator(ctx, getReaderPool(b.enc), b.b, pipeline)
+	return newEntryIterator(ctx, getReaderPool(b.enc), b.block, pipeline)
 }
 
 func (b encBlock) SampleIterator(ctx context.Context, extractor log.StreamSampleExtractor) iter.SampleIterator {
 	if len(b.b) == 0 {
 		return iter.NoopIterator
 	}
-	return newSampleIterator(ctx, getReaderPool(b.enc), b.b, extractor)
+	return newSampleIterator(ctx, getReaderPool(b.enc), b.block, extractor)
 }
 
 func (b block) Offset() int {
@@ -1134,8 +1154,8 @@ func unsafeGetBytes(s string) []byte {
 }
 
 type bufferedIterator struct {
-	origBytes []byte
-	stats     *stats.Context
+	block *block
+	stats *stats.Context
 
 	bufReader *bufio.Reader
 	reader    io.Reader
@@ -1150,12 +1170,12 @@ type bufferedIterator struct {
 	closed bool
 }
 
-func newBufferedIterator(ctx context.Context, pool ReaderPool, b []byte) *bufferedIterator {
+func newBufferedIterator(ctx context.Context, pool ReaderPool, b *block) *bufferedIterator {
 	stats := stats.FromContext(ctx)
-	stats.AddCompressedBytes(int64(len(b)))
+	stats.AddCompressedBytes(int64(len(b.b)))
 	return &bufferedIterator{
 		stats:     stats,
-		origBytes: b,
+		block:     b,
 		reader:    nil, // will be initialized later
 		bufReader: nil, // will be initialized later
 		pool:      pool,
@@ -1169,7 +1189,7 @@ func (si *bufferedIterator) Next() bool {
 
 	if !si.closed && si.reader == nil {
 		// initialize reader now, hopefully reusing one of the previous readers
-		si.reader = si.pool.GetReader(bytes.NewBuffer(si.origBytes))
+		si.reader = si.pool.GetReader(bytes.NewBuffer(si.block.b))
 		si.bufReader = BufReaderPool.Get(si.reader)
 	}
 
@@ -1264,10 +1284,10 @@ func (si *bufferedIterator) close() {
 		BytesBufferPool.Put(si.buf)
 		si.buf = nil
 	}
-	si.origBytes = nil
+	si.block = nil
 }
 
-func newEntryIterator(ctx context.Context, pool ReaderPool, b []byte, pipeline log.StreamPipeline) iter.EntryIterator {
+func newEntryIterator(ctx context.Context, pool ReaderPool, b *block, pipeline log.StreamPipeline) iter.EntryIterator {
 	return &entryBufferedIterator{
 		bufferedIterator: newBufferedIterator(ctx, pool, b),
 		pipeline:         pipeline,
@@ -1308,7 +1328,7 @@ func (e *entryBufferedIterator) Close() error {
 	return e.bufferedIterator.Close()
 }
 
-func newSampleIterator(ctx context.Context, pool ReaderPool, b []byte, extractor log.StreamSampleExtractor) iter.SampleIterator {
+func newSampleIterator(ctx context.Context, pool ReaderPool, b *block, extractor log.StreamSampleExtractor) iter.SampleIterator {
 	it := &sampleBufferedIterator{
 		bufferedIterator: newBufferedIterator(ctx, pool, b),
 		extractor:        extractor,

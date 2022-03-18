@@ -297,8 +297,10 @@ func (i *Ingester) collectChunksToFlush(instance *instance, fp model.Fingerprint
 
 	now := time.Now()
 	var result []*chunkDesc
+	var chunk *chunkDesc
 	for j := range stream.chunks {
-		shouldFlush, reason := i.shouldFlushChunk(&stream.chunks[j])
+		chunk = &stream.chunks[j]
+		shouldFlush, reason := i.shouldFlushChunk(chunk)
 		if immediate || shouldFlush {
 			// Ensure no more writes happen to this chunk.
 			if !stream.chunks[j].closed {
