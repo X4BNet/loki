@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"net/http"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -148,6 +150,7 @@ func (i *Ingester) flush(mayRemoveStreams bool) {
 func (i *Ingester) FlushHandler(w http.ResponseWriter, _ *http.Request) {
 	i.sweepUsers(true, true)
 	w.WriteHeader(http.StatusNoContent)
+	runtime.GC()
 }
 
 type flushOp struct {
@@ -175,32 +178,53 @@ func (i *Ingester) sweepUsers(immediate, mayRemoveStreams bool) {
 }
 
 func (i *Ingester) sweepInstance(instance *instance, immediate, mayRemoveStreams bool) {
+	flushCount := 0
 	_ = instance.streams.ForEach(func(s *stream) (bool, error) {
-		i.sweepStream(instance, s, immediate)
+		flushed := i.sweepStream(instance, s, immediate)
 		i.removeFlushedChunks(instance, s, mayRemoveStreams)
+		if flushed {
+			flushCount++
+			if flushCount > 50 {
+				flushQueueIndex := int(uint64(s.fp) % uint64(i.cfg.ConcurrentFlushes))
+				for {
+					time.Sleep(time.Second)
+					if i.flushQueues[flushQueueIndex].Length() < 2 {
+						break
+					}
+				}
+				flushCount = 0
+			}
+		}
 		return true, nil
 	})
 }
 
-func (i *Ingester) sweepStream(instance *instance, stream *stream, immediate bool) {
+func (i *Ingester) sweepStream(instance *instance, stream *stream, immediate bool) bool {
 	stream.chunkMtx.RLock()
 	defer stream.chunkMtx.RUnlock()
 	if len(stream.chunks) == 0 {
-		return
+		return false
 	}
 
 	lastChunk := stream.chunks[len(stream.chunks)-1]
 	shouldFlush, _ := i.shouldFlushChunk(&lastChunk)
 	if len(stream.chunks) == 1 && !immediate && !shouldFlush {
-		return
+		return false
 	}
 
 	flushQueueIndex := int(uint64(stream.fp) % uint64(i.cfg.ConcurrentFlushes))
 	firstTime, _ := stream.chunks[0].chunk.Bounds()
-	i.flushQueues[flushQueueIndex].Enqueue(&flushOp{
+	flushQueue := i.flushQueues[flushQueueIndex]
+	flushQueue.Enqueue(&flushOp{
 		model.TimeFromUnixNano(firstTime.UnixNano()), instance.instanceID,
 		stream.fp, immediate,
 	})
+
+	if flushQueue.Length() > 10 {
+		time.Sleep(time.Second)
+	}
+
+	return true
 }
 
 func (i *Ingester) flushLoop(j int) {
@@ -221,6 +245,10 @@ func (i *Ingester) flushLoop(j int) {
 		err := i.flushUserSeries(op.userID, op.fp, op.immediate)
 		if err != nil {
 			level.Error(util_log.WithUserID(op.userID, util_log.Logger)).Log("msg", "failed to flush user", "err", err)
+			if strings.HasPrefix(err.Error(), "SlowDown:") {
+				runtime.GC()
+				time.Sleep(time.Second)
+			}
 		}
 
 		// If we're exiting & we failed to flush, put the failed operation
@@ -229,6 +257,8 @@ func (i *Ingester) flushLoop(j int) {
 			op.from = op.from.Add(flushBackoff)
 			i.flushQueues[j].Enqueue(op)
 		}
+
+		runtime.GC()
 	}
 }
 
@@ -266,9 +296,12 @@ func (i *Ingester) collectChunksToFlush(instance *instance, fp model.Fingerprint
 	stream.chunkMtx.Lock()
 	defer stream.chunkMtx.Unlock()
 
+	now := time.Now()
 	var result []*chunkDesc
+	var chunk *chunkDesc
 	for j := range stream.chunks {
-		shouldFlush, reason := i.shouldFlushChunk(&stream.chunks[j])
+		chunk = &stream.chunks[j]
+		shouldFlush, reason := i.shouldFlushChunk(chunk)
 		if immediate || shouldFlush {
 			// Ensure no more writes happen to this chunk.
 			if !stream.chunks[j].closed {
@@ -276,12 +309,23 @@ func (i *Ingester) collectChunksToFlush(instance *instance, fp model.Fingerprint
 			}
 			// Flush this chunk if it hasn't already been successfully flushed.
 			if stream.chunks[j].flushed.IsZero() {
+				result = append(result, chunk)
 				if immediate {
 					reason = flushReasonForced
 				}
 				stream.chunks[j].reason = reason
 
 				result = append(result, &stream.chunks[j])
+			}
+		} else {
+			shouldFlush := time.Since(chunk.lastUpdated) > i.cfg.MaxBlockIdle && chunk.chunk.HeadSize() >= i.cfg.MinBlockIdleSize
+			if shouldFlush {
+				chunk.chunk.Cut()
+			}
+		} else {
+			shouldFlush := now.Sub(chunk.lastUpdated) > i.cfg.MaxBlockIdle && chunk.chunk.HeadSize() >= i.cfg.MinBlockIdleSize
+			if shouldFlush {
+				chunk.chunk.Cut()
 			}
 		}
 	}
@@ -359,7 +403,6 @@ func (i *Ingester) flushChunks(ctx context.Context, fp model.Fingerprint, labelP
 	labelsBuilder := labels.NewBuilder(labelPairs)
 	labelsBuilder.Set(nameLabel, logsValue)
 	metric := labelsBuilder.Labels()
-
 	sizePerTenant := chunkSizePerTenant.WithLabelValues(userID)
 	countPerTenant := chunksPerTenant.WithLabelValues(userID)
 
@@ -371,7 +414,7 @@ func (i *Ingester) flushChunks(ctx context.Context, fp model.Fingerprint, labelP
 		firstTime, lastTime := loki_util.RoundToMilliseconds(c.chunk.Bounds())
 		ch := chunk.NewChunk(
 			userID, fp, metric,
-			chunkenc.NewFacade(c.chunk, i.cfg.BlockSize, i.cfg.TargetChunkSize),
+			chunkenc.NewFacade(c.chunk, i.cfg.BlockSize, i.cfg.ChunkTargetSize, i.cfg.ChunkMaxSize, i.cfg.ChunkMinTime),
 			firstTime,
 			lastTime,
 		)

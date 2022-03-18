@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 
 	"github.com/grafana/dskit/tenant"
 
+	"github.com/grafana/loki/pkg/chunkenc"
 	"github.com/grafana/loki/pkg/iter"
 	"github.com/grafana/loki/pkg/logproto"
 	"github.com/grafana/loki/pkg/logql"
@@ -31,6 +33,7 @@ import (
 	"github.com/grafana/loki/pkg/usagestats"
 	"github.com/grafana/loki/pkg/util"
 	"github.com/grafana/loki/pkg/util/deletion"
+	"github.com/grafana/loki/pkg/util/spanlogger"
 )
 
 var (
@@ -44,9 +47,209 @@ type Store interface {
 	stores.Store
 	SelectSamples(ctx context.Context, req logql.SelectSampleParams) (iter.SampleIterator, error)
 	SelectLogs(ctx context.Context, req logql.SelectLogParams) (iter.EntryIterator, error)
+
 	Series(ctx context.Context, req logql.SelectLogParams) ([]logproto.SeriesIdentifier, error)
 	GetSchemaConfigs() []config.PeriodConfig
 	SetChunkFilterer(chunkFilter chunk.RequestChunkFilterer)
+	SetPostFetcherChunkFilterer(requestPostFetcherChunkFilterer RequestPostFetcherChunkFilterer)
+}
+
+// RequestChunkFilterer creates ChunkFilterer for a given request context.
+type RequestChunkFilterer interface {
+	ForRequest(ctx context.Context) ChunkFilterer
+}
+
+// ChunkFilterer filters chunks based on the metric.
+type ChunkFilterer interface {
+	ShouldFilter(metric labels.Labels) bool
+}
+
+// RequestChunkFilterer creates ChunkFilterer for a given request context.
+type RequestPostFetcherChunkFilterer interface {
+	ForRequest(req logql.SelectLogParams) PostFetcherChunkFilterer
+}
+
+// PostFetcherChunkFilterer filters chunks based on pipeline for log selector expr.
+type PostFetcherChunkFilterer interface {
+	PostFetchFilter(ctx context.Context, chunks []chunk.Chunk, s chunk.SchemaConfig) ([]chunk.Chunk, []string, error)
+	SetQueryRangeTime(from time.Time, through time.Time, nextChunk *LazyChunk)
+}
+
+type requestPostFetcherChunkFilterer struct {
+	maxParallelPipelineChunk int
+}
+
+func NewRequestPostFetcherChunkFiltererForRequest(maxParallelPipelineChunk int) RequestPostFetcherChunkFilterer {
+	return &requestPostFetcherChunkFilterer{maxParallelPipelineChunk: maxParallelPipelineChunk}
+}
+func (c *requestPostFetcherChunkFilterer) ForRequest(req logql.SelectLogParams) PostFetcherChunkFilterer {
+	return &chunkFiltererByExpr{req: req, maxParallelPipelineChunk: c.maxParallelPipelineChunk}
+}
+
+type chunkFiltererByExpr struct {
+	maxParallelPipelineChunk int
+	req                      logql.SelectLogParams
+	from                     time.Time
+	through                  time.Time
+	nextChunk                *LazyChunk
+}
+
+func (c *chunkFiltererByExpr) SetQueryRangeTime(from time.Time, through time.Time, nextChunk *LazyChunk) {
+	c.from = from
+	c.through = through
+	c.nextChunk = nextChunk
+}
+
+func (c *chunkFiltererByExpr) PostFetchFilter(ctx context.Context, chunks []chunk.Chunk, s chunk.SchemaConfig) ([]chunk.Chunk, []string, error) {
+	if len(chunks) == 0 {
+		return chunks, nil, nil
+	}
+	postFilterChunkLen := 0
+	log, ctx := spanlogger.New(ctx, "Batch.ParallelPostFetchFilter")
+	log.Span.LogFields(otlog.Int("chunks", len(chunks)))
+	defer func() {
+		log.Span.LogFields(otlog.Int("postFilterChunkLen", postFilterChunkLen))
+		log.Span.Finish()
+	}()
+
+	logSelector, err := logql.ParseLogSelector(c.req.Selector, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !logSelector.HasFilter() {
+		return chunks, nil, nil
+	}
+	//
+	result := make([]chunk.Chunk, 0)
+	resultKeys := make([]string, 0)
+
+	if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
+	queuedChunks := make(chan chunk.Chunk)
+	go func() {
+		for _, c := range chunks {
+			queuedChunks <- c
+		}
+		close(queuedChunks)
+	}()
+	processedChunks := make(chan *chunkWithKey)
+	errors := make(chan error)
+	for i := 0; i < min(c.maxParallelPipelineChunk, len(chunks)); i++ {
+		go func() {
+			for cnk := range queuedChunks {
+				cnkWithKey, err := c.pipelineExecChunk(ctx, cnk, logSelector, s)
+				if err != nil {
+					errors <- err
+				} else {
+					processedChunks <- cnkWithKey
+				}
+			}
+		}()
+	}
+	var lastErr error
+	for i := 0; i < len(chunks); i++ {
+		select {
+		case chunkWithKey := <-processedChunks:
+			result = append(result, chunkWithKey.cnk)
+			resultKeys = append(resultKeys, chunkWithKey.key)
+			if chunkWithKey.isPostFilter {
+				postFilterChunkLen++
+			}
+		case err := <-errors:
+			lastErr = err
+		}
+	}
+	return result, resultKeys, lastErr
+}
+
+func (c *chunkFiltererByExpr) pipelineExecChunk(ctx context.Context, cnk chunk.Chunk, logSelector logql.LogSelectorExpr, s chunk.SchemaConfig) (*chunkWithKey, error) {
+	pipeline, err := logSelector.Pipeline()
+	if err != nil {
+		return nil, err
+	}
+	blocks := 0
+	postLen := 0
+	log, ctx := spanlogger.New(ctx, "chunkFiltererByExpr.pipelineExecChunk")
+	defer func() {
+		log.Span.LogFields(otlog.Int("blocks", blocks))
+		log.Span.LogFields(otlog.Int("postFilterChunkLen", postLen))
+		log.Span.Finish()
+	}()
+	streamPipeline := pipeline.ForStream(cnk.Metric.WithoutLabels(labels.MetricName))
+	chunkData := cnk.Data
+	lazyChunk := LazyChunk{Chunk: cnk}
+	newCtr, statCtx := stats.NewContext(ctx)
+	iterator, err := lazyChunk.Iterator(statCtx, c.from, c.through, c.req.Direction, streamPipeline, c.nextChunk)
+	if err != nil {
+		return nil, err
+	}
+	lokiChunk := chunkData.(*chunkenc.Facade).LokiChunk()
+	postFilterChunkData := chunkenc.NewMemChunk(lokiChunk.Encoding(), chunkenc.UnorderedHeadBlockFmt, cnk.Data.Size(), cnk.Data.Size(), cnk.Data.Size(), time.Minute)
+	headChunkBytes := int64(0)
+	headChunkLine := int64(0)
+	decompressedLines := int64(0)
+	for iterator.Next() {
+		entry := iterator.Entry()
+		err := postFilterChunkData.Append(&entry)
+		if err != nil {
+			return nil, err
+		}
+		headChunkBytes += int64(len(entry.Line))
+		headChunkLine += int64(1)
+		decompressedLines += int64(1)
+
+	}
+	if err := postFilterChunkData.Close(); err != nil {
+		return nil, err
+	}
+	firstTime, lastTime := util.RoundToMilliseconds(postFilterChunkData.Bounds())
+	postFilterCh := chunk.NewChunk(
+		cnk.UserID, cnk.Fingerprint, cnk.Metric,
+		chunkenc.NewFacade(postFilterChunkData, 0, 0, 0, time.Minute),
+		firstTime,
+		lastTime,
+	)
+	chunkSize := postFilterChunkData.BytesSize() + 4*1024 // size + 4kB should be enough room for cortex header
+	if err := postFilterCh.EncodeTo(bytes.NewBuffer(make([]byte, 0, chunkSize))); err != nil {
+		return nil, err
+	}
+
+	decompressedBytes := int64(0)
+	compressedBytes := int64(0)
+	isPostFilter := false
+	postLen = postFilterChunkData.Size()
+	if postFilterChunkData.Size() != 0 {
+		isPostFilter = true
+		decompressedBytes = int64(postFilterChunkData.BytesSize())
+		encodedBytes, err := postFilterCh.Encoded()
+		if err != nil {
+			return nil, err
+		}
+		compressedBytes = int64(len(encodedBytes))
+	}
+	chunkStats := newCtr.Ingester().Store.Chunk
+	statContext := stats.FromContext(ctx)
+	statContext.AddHeadChunkLines(chunkStats.GetHeadChunkLines() - headChunkLine)
+	statContext.AddDecompressedLines(chunkStats.GetDecompressedLines() - decompressedLines)
+	statContext.AddHeadChunkBytes(chunkStats.GetHeadChunkBytes() - headChunkBytes)
+	statContext.AddDecompressedBytes(chunkStats.GetDecompressedBytes() - decompressedBytes)
+	statContext.AddCompressedBytes(chunkStats.GetCompressedBytes() - compressedBytes)
+
+	return &chunkWithKey{cnk: postFilterCh, key: s.ExternalKey(cnk), isPostFilter: isPostFilter}, nil
+}
+
+type chunkWithKey struct {
+	cnk          chunk.Chunk
+	key          string
+	isPostFilter bool
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 type store struct {

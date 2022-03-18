@@ -130,7 +130,7 @@ func (f *testIngesterFactory) getIngester(joinAfter time.Duration, t *testing.T)
 	// Force a tiny chunk size and no encoding so we can guarantee multiple chunks
 	// These values are also crafted around the specific use of `line _` in the log line which is 6 bytes long
 	cfg.BlockSize = 3 // Block size needs to be less than chunk size so we can get more than one block per chunk
-	cfg.TargetChunkSize = 24
+	cfg.ChunkTargetSize = 24
 	cfg.ChunkEncoding = chunkenc.EncNone.String()
 
 	cfg.ingesterClientFactory = func(cfg client.Config, addr string) (client.HealthAndIngesterClient, error) {
