@@ -759,7 +759,7 @@ func (c *MemChunk) Cut() error {
 	if err != nil {
 		return err
 	}
-	copy(buffer, buffer2)
+	copy(buffer2, buffer)
 
 	// mmap must allocate at-least one page
 	// syscall.MADV_PAGEOUT is not defined
