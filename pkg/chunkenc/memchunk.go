@@ -761,10 +761,9 @@ func (c *MemChunk) Cut() error {
 	}
 	copy(buffer, buffer2)
 
-	if len(b) >= 8192 {
-		// syscall.MADV_PAGEOUT is not defined
-		unix.Madvise(b, 21)
-	}
+	// mmap must allocate at-least one page
+	// syscall.MADV_PAGEOUT is not defined
+	unix.Madvise(buffer2, 21)
 
 	mint, maxt := c.head.Bounds()
 	blk := &block{
