@@ -741,7 +741,10 @@ func (c *MemChunk) ConvertHead(desired HeadBlockFmt) error {
 }
 
 func finalizeBlock(b *block) {
-	MmapFree(b.b)
+	err := MmapFree(b.b)
+	if err != nil {
+		panic(err)
+	}
 }
 
 // cut a new block and add it to finished blocks.
@@ -984,14 +987,14 @@ func (b encBlock) Iterator(ctx context.Context, pipeline log.StreamPipeline) ite
 	if len(b.b) == 0 {
 		return iter.NoopIterator
 	}
-	return newEntryIterator(ctx, getReaderPool(b.enc), b.b, pipeline)
+	return newEntryIterator(ctx, getReaderPool(b.enc), b.block, pipeline)
 }
 
 func (b encBlock) SampleIterator(ctx context.Context, extractor log.StreamSampleExtractor) iter.SampleIterator {
 	if len(b.b) == 0 {
 		return iter.NoopIterator
 	}
-	return newSampleIterator(ctx, getReaderPool(b.enc), b.b, extractor)
+	return newSampleIterator(ctx, getReaderPool(b.enc), b.block, extractor)
 }
 
 func (b block) Offset() int {
@@ -1130,8 +1133,8 @@ func unsafeGetBytes(s string) []byte {
 }
 
 type bufferedIterator struct {
-	origBytes []byte
-	stats     *stats.Context
+	block *block
+	stats *stats.Context
 
 	bufReader *bufio.Reader
 	reader    io.Reader
@@ -1146,12 +1149,12 @@ type bufferedIterator struct {
 	closed bool
 }
 
-func newBufferedIterator(ctx context.Context, pool ReaderPool, b []byte) *bufferedIterator {
+func newBufferedIterator(ctx context.Context, pool ReaderPool, b *block) *bufferedIterator {
 	stats := stats.FromContext(ctx)
-	stats.AddCompressedBytes(int64(len(b)))
+	stats.AddCompressedBytes(int64(len(b.b)))
 	return &bufferedIterator{
 		stats:     stats,
-		origBytes: b,
+		block:     b,
 		reader:    nil, // will be initialized later
 		bufReader: nil, // will be initialized later
 		pool:      pool,
@@ -1165,7 +1168,7 @@ func (si *bufferedIterator) Next() bool {
 
 	if !si.closed && si.reader == nil {
 		// initialize reader now, hopefully reusing one of the previous readers
-		si.reader = si.pool.GetReader(bytes.NewBuffer(si.origBytes))
+		si.reader = si.pool.GetReader(bytes.NewBuffer(si.block.b))
 		si.bufReader = BufReaderPool.Get(si.reader)
 	}
 
@@ -1259,10 +1262,10 @@ func (si *bufferedIterator) close() {
 		BytesBufferPool.Put(si.buf)
 		si.buf = nil
 	}
-	si.origBytes = nil
+	si.block = nil
 }
 
-func newEntryIterator(ctx context.Context, pool ReaderPool, b []byte, pipeline log.StreamPipeline) iter.EntryIterator {
+func newEntryIterator(ctx context.Context, pool ReaderPool, b *block, pipeline log.StreamPipeline) iter.EntryIterator {
 	return &entryBufferedIterator{
 		bufferedIterator: newBufferedIterator(ctx, pool, b),
 		pipeline:         pipeline,
@@ -1299,7 +1302,7 @@ func (e *entryBufferedIterator) Next() bool {
 	return false
 }
 
-func newSampleIterator(ctx context.Context, pool ReaderPool, b []byte, extractor log.StreamSampleExtractor) iter.SampleIterator {
+func newSampleIterator(ctx context.Context, pool ReaderPool, b *block, extractor log.StreamSampleExtractor) iter.SampleIterator {
 	it := &sampleBufferedIterator{
 		bufferedIterator: newBufferedIterator(ctx, pool, b),
 		extractor:        extractor,
