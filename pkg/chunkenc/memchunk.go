@@ -523,6 +523,9 @@ func (c *MemChunk) WriteTo(w io.Writer) (int64, error) {
 			return offset, errors.Wrap(err, "write block")
 		}
 		offset += int64(n)
+
+		// We are done with the block data now
+		unix.Madvise(b.b, 21)
 	}
 
 	metasOffset := offset
@@ -1242,6 +1245,7 @@ func (si *bufferedIterator) Error() error { return si.err }
 
 func (si *bufferedIterator) Close() error {
 	if !si.closed {
+		unix.Madvise(si.block, 21)
 		si.closed = true
 		si.close()
 	}
