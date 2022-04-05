@@ -1245,7 +1245,7 @@ func (si *bufferedIterator) Error() error { return si.err }
 
 func (si *bufferedIterator) Close() error {
 	if !si.closed {
-		unix.Madvise(si.block, 21)
+		unix.Madvise(si.block.b, 21)
 		si.closed = true
 		si.close()
 	}
