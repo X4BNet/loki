@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"net/http"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -147,6 +149,7 @@ func (i *Ingester) flush(mayRemoveStreams bool) {
 func (i *Ingester) FlushHandler(w http.ResponseWriter, _ *http.Request) {
 	i.sweepUsers(true, true)
 	w.WriteHeader(http.StatusNoContent)
+	runtime.GC()
 }
 
 type flushOp struct {
@@ -174,32 +177,53 @@ func (i *Ingester) sweepUsers(immediate, mayRemoveStreams bool) {
 }
 
 func (i *Ingester) sweepInstance(instance *instance, immediate, mayRemoveStreams bool) {
+	flushCount := 0
 	_ = instance.streams.ForEach(func(s *stream) (bool, error) {
-		i.sweepStream(instance, s, immediate)
+		flushed := i.sweepStream(instance, s, immediate)
 		i.removeFlushedChunks(instance, s, mayRemoveStreams)
+		if flushed {
+			flushCount++
+			if flushCount > 50 {
+				flushQueueIndex := int(uint64(s.fp) % uint64(i.cfg.ConcurrentFlushes))
+				for {
+					time.Sleep(time.Second)
+					if i.flushQueues[flushQueueIndex].Length() < 2 {
+						break
+					}
+				}
+				flushCount = 0
+			}
+		}
 		return true, nil
 	})
 }
 
-func (i *Ingester) sweepStream(instance *instance, stream *stream, immediate bool) {
+func (i *Ingester) sweepStream(instance *instance, stream *stream, immediate bool) bool {
 	stream.chunkMtx.RLock()
 	defer stream.chunkMtx.RUnlock()
 	if len(stream.chunks) == 0 {
-		return
+		return false
 	}
 
 	lastChunk := stream.chunks[len(stream.chunks)-1]
 	shouldFlush, _ := i.shouldFlushChunk(&lastChunk)
 	if len(stream.chunks) == 1 && !immediate && !shouldFlush {
-		return
+		return false
 	}
 
 	flushQueueIndex := int(uint64(stream.fp) % uint64(i.cfg.ConcurrentFlushes))
 	firstTime, _ := stream.chunks[0].chunk.Bounds()
-	i.flushQueues[flushQueueIndex].Enqueue(&flushOp{
+	flushQueue := i.flushQueues[flushQueueIndex]
+	flushQueue.Enqueue(&flushOp{
 		model.TimeFromUnixNano(firstTime.UnixNano()), instance.instanceID,
 		stream.fp, immediate,
 	})
+
+	if flushQueue.Length() > 10 {
+		time.Sleep(time.Second)
+	}
+
+	return true
 }
 
 func (i *Ingester) flushLoop(j int) {
@@ -220,6 +244,10 @@ func (i *Ingester) flushLoop(j int) {
 		err := i.flushUserSeries(op.userID, op.fp, op.immediate)
 		if err != nil {
 			level.Error(util_log.WithUserID(op.userID, util_log.Logger)).Log("msg", "failed to flush user", "err", err)
+			if strings.HasPrefix(err.Error(), "SlowDown:") {
+				runtime.GC()
+				time.Sleep(time.Second)
+			}
 		}
 
 		// If we're exiting & we failed to flush, put the failed operation
@@ -228,6 +256,8 @@ func (i *Ingester) flushLoop(j int) {
 			op.from = op.from.Add(flushBackoff)
 			i.flushQueues[j].Enqueue(op)
 		}
+
+		runtime.GC()
 	}
 }
 
@@ -265,6 +295,7 @@ func (i *Ingester) collectChunksToFlush(instance *instance, fp model.Fingerprint
 	stream.chunkMtx.Lock()
 	defer stream.chunkMtx.Unlock()
 
+	now := time.Now()
 	var result []*chunkDesc
 	for j := range stream.chunks {
 		shouldFlush, reason := i.shouldFlushChunk(&stream.chunks[j])
@@ -276,18 +307,18 @@ func (i *Ingester) collectChunksToFlush(instance *instance, fp model.Fingerprint
 			// Flush this chunk if it hasn't already been successfully flushed.
 			if stream.chunks[j].flushed.IsZero() {
 				result = append(result, &stream.chunks[j])
-				if immediate {
-					reason = flushReasonForced
-				}
-				chunksFlushedPerReason.WithLabelValues(reason).Add(1)
+				stream.chunks[j].reason = reason
 			}
-		}
+		} else {
+			shouldFlush := now.Sub(chunk.lastUpdated) > i.cfg.MaxBlockIdle && chunk.chunk.HeadSize() >= i.cfg.MinBlockIdleSize
+			if shouldFlush {
+				chunk.chunk.Cut()
+			}
 	}
 	return result, stream.labels, &stream.chunkMtx
 }
 
 func (i *Ingester) shouldFlushChunk(chunk *chunkDesc) (bool, string) {
-	// Append should close the chunk when the a new one is added.
 	if chunk.closed {
 		if chunk.synced {
 			return true, flushReasonSynced
@@ -341,6 +372,11 @@ func (i *Ingester) removeFlushedChunks(instance *instance, stream *stream, mayRe
 	}
 }
 
+// flushChunks iterates over given chunkDescs, derives chunk.Chunk from them and flush them to the store, one at a time.
+//
+// If a chunk fails to be flushed, this operation is reinserted in the queue. Since previously flushed chunks
+// are marked as flushed, they shouldn't be flushed again.
+// It has to close given chunks to have have the head block included.
 func (i *Ingester) flushChunks(ctx context.Context, fp model.Fingerprint, labelPairs labels.Labels, cs []*chunkDesc, chunkMtx sync.Locker) error {
 	userID, err := tenant.TenantID(ctx)
 	if err != nil {
@@ -351,87 +387,125 @@ func (i *Ingester) flushChunks(ctx context.Context, fp model.Fingerprint, labelP
 	labelsBuilder.Set(nameLabel, logsValue)
 	metric := labelsBuilder.Labels()
 
-	wireChunks := make([]chunk.Chunk, len(cs))
-
-	// use anonymous function to make lock releasing simpler.
-	err = func() error {
-		chunkMtx.Lock()
-		defer chunkMtx.Unlock()
-
-		for j, c := range cs {
-			// Ensure that new blocks are cut before flushing as data in the head block is not included otherwise.
-			if err := c.chunk.Close(); err != nil {
-				return err
-			}
-			firstTime, lastTime := loki_util.RoundToMilliseconds(c.chunk.Bounds())
-			ch := chunk.NewChunk(
-				userID, fp, metric,
-				chunkenc.NewFacade(c.chunk, i.cfg.BlockSize, i.cfg.TargetChunkSize),
-				firstTime,
-				lastTime,
-			)
-
-			chunkSize := c.chunk.BytesSize() + 4*1024 // size + 4kB should be enough room for cortex header
-			start := time.Now()
-			if err := ch.EncodeTo(bytes.NewBuffer(make([]byte, 0, chunkSize))); err != nil {
-				return err
-			}
-			chunkEncodeTime.Observe(time.Since(start).Seconds())
-			wireChunks[j] = ch
-		}
-		return nil
-	}()
-
-	if err != nil {
-		return err
-	}
-
-	if err := i.store.Put(ctx, wireChunks); err != nil {
-		return err
-	}
-	flushedChunksStats.Inc(int64(len(wireChunks)))
-
-	// Record statistics only when actual put request did not return error.
 	sizePerTenant := chunkSizePerTenant.WithLabelValues(userID)
 	countPerTenant := chunksPerTenant.WithLabelValues(userID)
 
-	chunkMtx.Lock()
-	defer chunkMtx.Unlock()
-
-	for i, wc := range wireChunks {
-
-		// flush successful, write while we have lock
-		cs[i].flushed = time.Now()
-
-		numEntries := cs[i].chunk.Size()
-		byt, err := wc.Encoded()
-		if err != nil {
-			continue
+	for j, c := range cs {
+		if err := i.closeChunk(c, chunkMtx); err != nil {
+			return fmt.Errorf("chunk close for flushing: %w", err)
 		}
 
-		compressedSize := float64(len(byt))
-		uncompressedSize, ok := chunkenc.UncompressedSize(wc.Data)
+		firstTime, lastTime := loki_util.RoundToMilliseconds(c.chunk.Bounds())
+		ch := chunk.NewChunk(
+			userID, fp, metric,
+			chunkenc.NewFacade(c.chunk, i.cfg.BlockSize, i.cfg.ChunkTargetSize, i.cfg.ChunkMaxSize, i.cfg.ChunkMinTime),
+			firstTime,
+			lastTime,
+		)
 
-		if ok && compressedSize > 0 {
-			chunkCompressionRatio.Observe(float64(uncompressedSize) / compressedSize)
+		// encodeChunk mutates the chunk so we must pass by reference
+		if err := i.encodeChunk(ctx, &ch, c); err != nil {
+			return err
 		}
 
-		utilization := wc.Data.Utilization()
-		chunkUtilization.Observe(utilization)
-		chunkEntries.Observe(float64(numEntries))
-		chunkSize.Observe(compressedSize)
-		sizePerTenant.Add(compressedSize)
-		countPerTenant.Inc()
-		firstTime, lastTime := cs[i].chunk.Bounds()
-		chunkAge.Observe(time.Since(firstTime).Seconds())
-		chunkLifespan.Observe(lastTime.Sub(firstTime).Hours())
+		if err := i.flushChunk(ctx, &ch); err != nil {
+			return err
+		}
 
-		flushedChunksBytesStats.Record(compressedSize)
-		flushedChunksLinesStats.Record(float64(numEntries))
-		flushedChunksUtilizationStats.Record(utilization)
-		flushedChunksAgeStats.Record(time.Since(firstTime).Seconds())
-		flushedChunksLifespanStats.Record(lastTime.Sub(firstTime).Hours())
+		i.markChunkAsFlushed(cs[j], chunkMtx)
+
+		reason := func() string {
+			chunkMtx.Lock()
+			defer chunkMtx.Unlock()
+
+			return c.reason
+		}()
+
+		i.reportFlushedChunkStatistics(&ch, c, sizePerTenant, countPerTenant, reason)
 	}
 
 	return nil
+}
+
+// markChunkAsFlushed mark a chunk to make sure it won't be flushed if this operation fails.
+func (i *Ingester) markChunkAsFlushed(desc *chunkDesc, chunkMtx sync.Locker) {
+	chunkMtx.Lock()
+	defer chunkMtx.Unlock()
+	desc.flushed = time.Now()
+}
+
+// closeChunk closes the given chunk while locking it to ensure that new blocks are cut before flushing.
+//
+// If the chunk isn't closed, data in the head block isn't included.
+func (i *Ingester) closeChunk(desc *chunkDesc, chunkMtx sync.Locker) error {
+	chunkMtx.Lock()
+	defer chunkMtx.Unlock()
+
+	return desc.chunk.Close()
+}
+
+// encodeChunk encodes a chunk.Chunk based on the given chunkDesc.
+//
+// If the encoding is unsuccessful the flush operation is reinserted in the queue which will cause
+// the encoding for a given chunk to be evaluated again.
+func (i *Ingester) encodeChunk(ctx context.Context, ch *chunk.Chunk, desc *chunkDesc) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	start := time.Now()
+	chunkBytesSize := desc.chunk.BytesSize() + 4*1024 // size + 4kB should be enough room for cortex header
+	if err := ch.EncodeTo(bytes.NewBuffer(make([]byte, 0, chunkBytesSize))); err != nil {
+		return fmt.Errorf("chunk encoding: %w", err)
+	}
+	chunkEncodeTime.Observe(time.Since(start).Seconds())
+	return nil
+}
+
+// flushChunk flushes the given chunk to the store.
+//
+// If the flush is successful, metrics for this flush are to be reported.
+// If the flush isn't successful, the operation for this userID is requeued allowing this and all other unflushed
+// chunk to have another opportunity to be flushed.
+func (i *Ingester) flushChunk(ctx context.Context, ch *chunk.Chunk) error {
+	if err := i.store.Put(ctx, []chunk.Chunk{*ch}); err != nil {
+		return fmt.Errorf("store put chunk: %w", err)
+	}
+	flushedChunksStats.Inc(1)
+	return nil
+}
+
+// reportFlushedChunkStatistics calculate overall statistics of flushed chunks without compromising the flush process.
+func (i *Ingester) reportFlushedChunkStatistics(ch *chunk.Chunk, desc *chunkDesc, sizePerTenant prometheus.Counter, countPerTenant prometheus.Counter, reason string) {
+	byt, err := ch.Encoded()
+	if err != nil {
+		level.Error(util_log.Logger).Log("msg", "failed to encode flushed wire chunk", "err", err)
+		return
+	}
+
+	chunksFlushedPerReason.WithLabelValues(reason).Add(1)
+
+	compressedSize := float64(len(byt))
+	uncompressedSize, ok := chunkenc.UncompressedSize(ch.Data)
+
+	if ok && compressedSize > 0 {
+		chunkCompressionRatio.Observe(float64(uncompressedSize) / compressedSize)
+	}
+
+	utilization := ch.Data.Utilization()
+	chunkUtilization.Observe(utilization)
+	numEntries := desc.chunk.Size()
+	chunkEntries.Observe(float64(numEntries))
+	chunkSize.Observe(compressedSize)
+	sizePerTenant.Add(compressedSize)
+	countPerTenant.Inc()
+
+	boundsFrom, boundsTo := desc.chunk.Bounds()
+	chunkAge.Observe(time.Since(boundsFrom).Seconds())
+	chunkLifespan.Observe(boundsTo.Sub(boundsFrom).Hours())
+
+	flushedChunksBytesStats.Record(compressedSize)
+	flushedChunksLinesStats.Record(float64(numEntries))
+	flushedChunksUtilizationStats.Record(utilization)
+	flushedChunksAgeStats.Record(time.Since(boundsFrom).Seconds())
+	flushedChunksLifespanStats.Record(boundsTo.Sub(boundsFrom).Hours())
 }

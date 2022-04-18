@@ -103,6 +103,9 @@ type MemChunk struct {
 	// Target size in compressed bytes
 	targetSize int
 
+	maxSize int
+	minTime time.Duration
+
 	// The finished blocks.
 	blocks []block
 	// The compressed size of all the blocks
@@ -331,11 +334,13 @@ type entry struct {
 }
 
 // NewMemChunk returns a new in-mem chunk.
-func NewMemChunk(enc Encoding, head HeadBlockFmt, blockSize, targetSize int) *MemChunk {
+func NewMemChunk(enc Encoding, head HeadBlockFmt, blockSize, targetSize int, maxSize int, minTime time.Duration) *MemChunk {
 	return &MemChunk{
 		blockSize:  blockSize,  // The blockSize in bytes.
 		targetSize: targetSize, // Desired chunk size in compressed bytes
-		blocks:     []block{},
+		maxSize:    maxSize,
+		minTime:    minTime,
+		blocks:     []*block{},
 
 		format: DefaultChunkFormat,
 		head:   head.NewBlock(),
@@ -346,7 +351,7 @@ func NewMemChunk(enc Encoding, head HeadBlockFmt, blockSize, targetSize int) *Me
 }
 
 // NewByteChunk returns a MemChunk on the passed bytes.
-func NewByteChunk(b []byte, blockSize, targetSize int) (*MemChunk, error) {
+func NewByteChunk(b []byte, blockSize, targetSize int, maxSize int, minTime time.Duration) (*MemChunk, error) {
 	bc := &MemChunk{
 		head:       &headBlock{}, // Dummy, empty headblock.
 		blockSize:  blockSize,
@@ -521,6 +526,9 @@ func (c *MemChunk) WriteTo(w io.Writer) (int64, error) {
 			return offset, errors.Wrap(err, "write block")
 		}
 		offset += int64(n)
+
+		// We are done with the block data now
+		b.Pageout()
 	}
 
 	metasOffset := offset
@@ -584,8 +592,8 @@ func (c *MemChunk) CheckpointSize() (chunk, head int) {
 	return c.BytesSize(), c.head.CheckpointSize()
 }
 
-func MemchunkFromCheckpoint(chk, head []byte, desired HeadBlockFmt, blockSize int, targetSize int) (*MemChunk, error) {
-	mc, err := NewByteChunk(chk, blockSize, targetSize)
+func MemchunkFromCheckpoint(chk, head []byte, desired HeadBlockFmt, blockSize int, targetSize int, maxSize int, minTime time.Duration) (*MemChunk, error) {
+	mc, err := NewByteChunk(chk, blockSize, targetSize, maxSize, minTime)
 	if err != nil {
 		return nil, err
 	}
@@ -623,14 +631,22 @@ func (c *MemChunk) BlockCount() int {
 
 // SpaceFor implements Chunk.
 func (c *MemChunk) SpaceFor(e *logproto.Entry) bool {
-	if c.targetSize > 0 {
-		// This is looking to see if the uncompressed lines will fit which is not
-		// a great check, but it will guarantee we are always under the target size
-		newHBSize := c.head.UncompressedSize() + len(e.Line)
-		return (c.cutBlockSize + newHBSize) < c.targetSize
+	if c.targetSize <= 0 {
+		// if targetSize is not defined, default to the original behavior of fixed blocks per chunk
+		return len(c.blocks) < blocksPerChunk
 	}
-	// if targetSize is not defined, default to the original behavior of fixed blocks per chunk
-	return len(c.blocks) < blocksPerChunk
+
+	// This is looking to see if the uncompressed lines will fit which is not
+	// a great check, but it will guarantee we are always under the target size
+	newSize := c.head.UncompressedSize() + len(e.Line) + c.cutBlockSize
+	if newSize > c.targetSize {
+		minTime, _ := c.Bounds()
+		if e.Timestamp.Sub(minTime) < c.minTime {
+			return true
+		}
+		return (newSize < c.maxSize)
+	}
+	return true
 }
 
 // UncompressedSize implements Chunk.
@@ -732,6 +748,14 @@ func (c *MemChunk) ConvertHead(desired HeadBlockFmt) error {
 	}
 	c.headFmt = desired
 	return nil
+}
+
+func finalizeBlock(b *block) {
+	err := MmapFree(b.b)
+	if err != nil {
+		panic(err)
+	}
+	b.b = nil
 }
 
 // cut a new block and add it to finished blocks.
@@ -921,12 +945,12 @@ func (c *MemChunk) Rebound(start, end time.Time) (Chunk, error) {
 	// as close as possible, respect the block/target sizes specified. However,
 	// if the blockSize is not set, use reasonable defaults.
 	if c.blockSize > 0 {
-		newChunk = NewMemChunk(c.Encoding(), c.headFmt, c.blockSize, c.targetSize)
+		newChunk = NewMemChunk(c.Encoding(), c.headFmt, c.blockSize, c.targetSize, c.maxSize, c.minTime)
 	} else {
 		// Using defaultBlockSize for target block size.
 		// The alternative here could be going over all the blocks and using the size of the largest block as target block size but I(Sandeep) feel that it is not worth the complexity.
 		// For target chunk size I am using compressed size of original chunk since the newChunk should anyways be lower in size than that.
-		newChunk = NewMemChunk(c.Encoding(), c.headFmt, defaultBlockSize, c.CompressedSize())
+		newChunk = NewMemChunk(c.Encoding(), c.headFmt, defaultBlockSize, c.CompressedSize(), c.maxSize, c.minTime)
 	}
 
 	for itr.Next() {
@@ -984,6 +1008,10 @@ func (b block) MinTime() int64 {
 
 func (b block) MaxTime() int64 {
 	return b.maxt
+}
+
+func (b block) Pageout() {
+	unix.Madvise(b.b, 21)
 }
 
 func (hb *headBlock) Iterator(ctx context.Context, direction logproto.Direction, mint, maxt int64, pipeline log.StreamPipeline) iter.EntryIterator {
@@ -1215,6 +1243,7 @@ func (si *bufferedIterator) Error() error { return si.err }
 
 func (si *bufferedIterator) Close() error {
 	if !si.closed {
+		si.block.Pageout()
 		si.closed = true
 		si.close()
 	}
@@ -1273,6 +1302,10 @@ func (e *entryBufferedIterator) Next() bool {
 		return true
 	}
 	return false
+
+}
+func (e *entryBufferedIterator) Close() error {
+	return e.bufferedIterator.Close()
 }
 
 func newSampleIterator(ctx context.Context, pool ReaderPool, b []byte, extractor log.StreamSampleExtractor) iter.SampleIterator {
