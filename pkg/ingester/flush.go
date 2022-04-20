@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -141,6 +142,7 @@ func (i *Ingester) flush(mayRemoveStreams bool) {
 
 	i.flushQueuesDone.Wait()
 	level.Debug(util_log.Logger).Log("msg", "flush queues have drained")
+	runtime.GC()
 }
 
 // FlushHandler triggers a flush of all in memory chunks.  Mainly used for
@@ -148,6 +150,7 @@ func (i *Ingester) flush(mayRemoveStreams bool) {
 func (i *Ingester) FlushHandler(w http.ResponseWriter, _ *http.Request) {
 	i.sweepUsers(true, true)
 	w.WriteHeader(http.StatusNoContent)
+	runtime.GC()
 }
 
 type flushOp struct {
