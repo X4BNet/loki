@@ -142,7 +142,6 @@ func (i *Ingester) flush(mayRemoveStreams bool) {
 
 	i.flushQueuesDone.Wait()
 	level.Debug(util_log.Logger).Log("msg", "flush queues have drained")
-	runtime.GC()
 }
 
 // FlushHandler triggers a flush of all in memory chunks.  Mainly used for
@@ -235,6 +234,8 @@ func (i *Ingester) flushLoop(j int) {
 			op.from = op.from.Add(flushBackoff)
 			i.flushQueues[j].Enqueue(op)
 		}
+
+		runtime.GC()
 	}
 }
 
