@@ -224,7 +224,8 @@ func (i *Ingester) flushLoop(j int) {
 		if err != nil {
 			level.Error(util_log.WithUserID(op.userID, util_log.Logger)).Log("msg", "failed to flush user", "err", err)
 			if strings.HasPrefix(err.Error(), "SlowDown:") {
-				time.Sleep(2 * time.Second)
+				runtime.GC()
+				time.Sleep(time.Second)
 			}
 		}
 
@@ -273,6 +274,7 @@ func (i *Ingester) collectChunksToFlush(instance *instance, fp model.Fingerprint
 	stream.chunkMtx.Lock()
 	defer stream.chunkMtx.Unlock()
 
+	now := time.Now()
 	var result []*chunkDesc
 	var chunk *chunkDesc
 	for j := range stream.chunks {
@@ -292,7 +294,7 @@ func (i *Ingester) collectChunksToFlush(instance *instance, fp model.Fingerprint
 				chunksFlushedPerReason.WithLabelValues(reason).Add(1)
 			}
 		} else {
-			shouldFlush := time.Since(chunk.lastUpdated) > i.cfg.MaxBlockIdle && chunk.chunk.HeadSize() >= i.cfg.MinBlockIdleSize
+			shouldFlush := now.Sub(chunk.lastUpdated) > i.cfg.MaxBlockIdle && chunk.chunk.HeadSize() >= i.cfg.MinBlockIdleSize
 			if shouldFlush {
 				chunk.chunk.Cut()
 			}

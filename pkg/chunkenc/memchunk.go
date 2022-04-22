@@ -748,6 +748,7 @@ func finalizeBlock(b *block) {
 	if err != nil {
 		panic(err)
 	}
+	b.b = nil
 }
 
 // cut a new block and add it to finished blocks.
