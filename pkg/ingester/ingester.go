@@ -76,7 +76,7 @@ type Config struct {
 	BlockSize           int               `yaml:"chunk_block_size"`
 	ChunkTargetSize     int               `yaml:"chunk_target_size"`
 	ChunkMaxSize        int               `yaml:"chunk_max_size"`
-	ChunkMinTime        time.Duration     `yaml:"chunk_min_size"`
+	ChunkMinTime        time.Duration     `yaml:"chunk_min_time"`
 	ChunkEncoding       string            `yaml:"chunk_encoding"`
 	parsedEncoding      chunkenc.Encoding `yaml:"-"` // placeholder for validated encoding
 	MaxChunkAge         time.Duration     `yaml:"max_chunk_age"`
