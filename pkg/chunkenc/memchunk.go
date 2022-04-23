@@ -633,21 +633,22 @@ func (c *MemChunk) BlockCount() int {
 
 // SpaceFor implements Chunk.
 func (c *MemChunk) SpaceFor(e *logproto.Entry) bool {
-	if c.targetSize > 0 {
-		// This is looking to see if the uncompressed lines will fit which is not
-		// a great check, but it will guarantee we are always under the target size
-		newSize := c.head.UncompressedSize() + len(e.Line) + c.cutBlockSize
-		if newSize > c.targetSize {
-			minTime, _ := c.Bounds()
-			if c.minTime > time.Since(minTime) {
-				return true
-			}
-			return (newSize < c.maxSize)
-		}
-		return false
+	if c.targetSize <= 0 {
+		// if targetSize is not defined, default to the original behavior of fixed blocks per chunk
+		return len(c.blocks) < blocksPerChunk
 	}
-	// if targetSize is not defined, default to the original behavior of fixed blocks per chunk
-	return len(c.blocks) < blocksPerChunk
+
+	// This is looking to see if the uncompressed lines will fit which is not
+	// a great check, but it will guarantee we are always under the target size
+	newSize := c.head.UncompressedSize() + len(e.Line) + c.cutBlockSize
+	if newSize > c.targetSize {
+		minTime, _ := c.Bounds()
+		if e.Timestamp.Sub(minTime) < c.minTime {
+			return true
+		}
+		return (newSize < c.maxSize)
+	}
+	return true
 }
 
 // UncompressedSize implements Chunk.
