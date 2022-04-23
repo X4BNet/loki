@@ -177,32 +177,53 @@ func (i *Ingester) sweepUsers(immediate, mayRemoveStreams bool) {
 }
 
 func (i *Ingester) sweepInstance(instance *instance, immediate, mayRemoveStreams bool) {
+	flushCount := 0
 	_ = instance.streams.ForEach(func(s *stream) (bool, error) {
-		i.sweepStream(instance, s, immediate)
+		flushed := i.sweepStream(instance, s, immediate)
 		i.removeFlushedChunks(instance, s, mayRemoveStreams)
+		if flushed {
+			flushCount++
+			if flushCount > 50 {
+				flushQueueIndex := int(uint64(s.fp) % uint64(i.cfg.ConcurrentFlushes))
+				for {
+					time.Sleep(time.Second)
+					if i.flushQueues[flushQueueIndex].Length() < 2 {
+						break
+					}
+				}
+				flushCount = 0
+			}
+		}
 		return true, nil
 	})
 }
 
-func (i *Ingester) sweepStream(instance *instance, stream *stream, immediate bool) {
+func (i *Ingester) sweepStream(instance *instance, stream *stream, immediate bool) bool {
 	stream.chunkMtx.RLock()
 	defer stream.chunkMtx.RUnlock()
 	if len(stream.chunks) == 0 {
-		return
+		return false
 	}
 
 	lastChunk := stream.chunks[len(stream.chunks)-1]
 	shouldFlush, _ := i.shouldFlushChunk(&lastChunk)
 	if len(stream.chunks) == 1 && !immediate && !shouldFlush {
-		return
+		return false
 	}
 
 	flushQueueIndex := int(uint64(stream.fp) % uint64(i.cfg.ConcurrentFlushes))
 	firstTime, _ := stream.chunks[0].chunk.Bounds()
-	i.flushQueues[flushQueueIndex].Enqueue(&flushOp{
+	flushQueue := i.flushQueues[flushQueueIndex]
+	flushQueue.Enqueue(&flushOp{
 		model.TimeFromUnixNano(firstTime.UnixNano()), instance.instanceID,
 		stream.fp, immediate,
 	})
+
+	if flushQueue.Length() > 10 {
+		time.Sleep(time.Second)
+	}
+
+	return true
 }
 
 func (i *Ingester) flushLoop(j int) {
