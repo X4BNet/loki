@@ -244,7 +244,7 @@ func (c *chunkFiltererByExpr) pipelineExecChunk(ctx context.Context, cnk chunk.C
 		return nil, err
 	}
 	lokiChunk := chunkData.(*chunkenc.Facade).LokiChunk()
-	postFilterChunkData := chunkenc.NewMemChunk(lokiChunk.Encoding(), chunkenc.UnorderedHeadBlockFmt, cnk.Data.Size(), cnk.Data.Size())
+	postFilterChunkData := chunkenc.NewMemChunk(lokiChunk.Encoding(), chunkenc.UnorderedHeadBlockFmt, cnk.Data.Size(), cnk.Data.Size(), cnk.Data.Size(), time.Minute)
 	headChunkBytes := int64(0)
 	headChunkLine := int64(0)
 	decompressedLines := int64(0)
@@ -265,7 +265,7 @@ func (c *chunkFiltererByExpr) pipelineExecChunk(ctx context.Context, cnk chunk.C
 	firstTime, lastTime := util.RoundToMilliseconds(postFilterChunkData.Bounds())
 	postFilterCh := chunk.NewChunk(
 		cnk.UserID, cnk.Fingerprint, cnk.Metric,
-		chunkenc.NewFacade(postFilterChunkData, 0, 0),
+		chunkenc.NewFacade(postFilterChunkData, 0, 0, 0, time.Minute),
 		firstTime,
 		lastTime,
 	)
