@@ -639,7 +639,7 @@ func (c *MemChunk) SpaceFor(e *logproto.Entry) bool {
 		newSize := c.head.UncompressedSize() + len(e.Line) + c.cutBlockSize
 		if newSize > c.targetSize {
 			minTime, _ := c.Bounds()
-			if c.minTime < time.Since(minTime) {
+			if time.Since(minTime) < c.minTime {
 				return true
 			}
 			return (newSize < c.maxSize)
