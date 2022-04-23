@@ -105,6 +105,9 @@ type MemChunk struct {
 	// Target size in compressed bytes
 	targetSize int
 
+	maxSize int
+	minTime time.Duration
+
 	// The finished blocks.
 	blocks []*block
 	// The compressed size of all the blocks
@@ -333,10 +336,12 @@ type entry struct {
 }
 
 // NewMemChunk returns a new in-mem chunk.
-func NewMemChunk(enc Encoding, head HeadBlockFmt, blockSize, targetSize int) *MemChunk {
+func NewMemChunk(enc Encoding, head HeadBlockFmt, blockSize, targetSize int, maxSize int, minTime time.Duration) *MemChunk {
 	return &MemChunk{
 		blockSize:  blockSize,  // The blockSize in bytes.
 		targetSize: targetSize, // Desired chunk size in compressed bytes
+		maxSize:    maxSize,
+		minTime:    minTime,
 		blocks:     []*block{},
 
 		format: DefaultChunkFormat,
@@ -348,7 +353,7 @@ func NewMemChunk(enc Encoding, head HeadBlockFmt, blockSize, targetSize int) *Me
 }
 
 // NewByteChunk returns a MemChunk on the passed bytes.
-func NewByteChunk(b []byte, blockSize, targetSize int) (*MemChunk, error) {
+func NewByteChunk(b []byte, blockSize, targetSize int, maxSize int, minTime time.Duration) (*MemChunk, error) {
 	bc := &MemChunk{
 		head:       &headBlock{}, // Dummy, empty headblock.
 		blockSize:  blockSize,
@@ -589,8 +594,8 @@ func (c *MemChunk) CheckpointSize() (chunk, head int) {
 	return c.BytesSize(), c.head.CheckpointSize()
 }
 
-func MemchunkFromCheckpoint(chk, head []byte, desired HeadBlockFmt, blockSize int, targetSize int) (*MemChunk, error) {
-	mc, err := NewByteChunk(chk, blockSize, targetSize)
+func MemchunkFromCheckpoint(chk, head []byte, desired HeadBlockFmt, blockSize int, targetSize int, maxSize int, minTime time.Duration) (*MemChunk, error) {
+	mc, err := NewByteChunk(chk, blockSize, targetSize, maxSize, minTime)
 	if err != nil {
 		return nil, err
 	}
@@ -631,8 +636,14 @@ func (c *MemChunk) SpaceFor(e *logproto.Entry) bool {
 	if c.targetSize > 0 {
 		// This is looking to see if the uncompressed lines will fit which is not
 		// a great check, but it will guarantee we are always under the target size
-		newHBSize := c.head.UncompressedSize() + len(e.Line)
-		return (c.cutBlockSize + newHBSize) < c.targetSize
+		newSize := c.head.UncompressedSize() + len(e.Line) + c.cutBlockSize
+		if newSize < c.targetSize {
+			minTime, _ := c.Bounds()
+			if c.minTime > time.Since(minTime) {
+				return true
+			}
+			return (newSize < c.maxSize)
+		}
 	}
 	// if targetSize is not defined, default to the original behavior of fixed blocks per chunk
 	return len(c.blocks) < blocksPerChunk
@@ -952,12 +963,12 @@ func (c *MemChunk) Rebound(start, end time.Time) (Chunk, error) {
 	// as close as possible, respect the block/target sizes specified. However,
 	// if the blockSize is not set, use reasonable defaults.
 	if c.blockSize > 0 {
-		newChunk = NewMemChunk(c.Encoding(), c.headFmt, c.blockSize, c.targetSize)
+		newChunk = NewMemChunk(c.Encoding(), c.headFmt, c.blockSize, c.targetSize, c.maxSize, c.minTime)
 	} else {
 		// Using defaultBlockSize for target block size.
 		// The alternative here could be going over all the blocks and using the size of the largest block as target block size but I(Sandeep) feel that it is not worth the complexity.
 		// For target chunk size I am using compressed size of original chunk since the newChunk should anyways be lower in size than that.
-		newChunk = NewMemChunk(c.Encoding(), c.headFmt, defaultBlockSize, c.CompressedSize())
+		newChunk = NewMemChunk(c.Encoding(), c.headFmt, defaultBlockSize, c.CompressedSize(), c.maxSize, c.minTime)
 	}
 
 	for itr.Next() {

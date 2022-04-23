@@ -223,7 +223,7 @@ func fillChunk(t testing.TB, c chunkenc.Chunk) {
 func dummyConf() *Config {
 	var conf Config
 	conf.BlockSize = 256 * 1024
-	conf.TargetChunkSize = 1500 * 1024
+	conf.ChunkTargetSize = 1500 * 1024
 
 	return &conf
 }
@@ -248,7 +248,7 @@ func Test_EncodingChunks(t *testing.T) {
 
 				t.Run(fmt.Sprintf("%v-%v-%s", f, close, tc.desc), func(t *testing.T) {
 					conf := tc.conf
-					c := chunkenc.NewMemChunk(chunkenc.EncGZIP, f, conf.BlockSize, conf.TargetChunkSize)
+					c := chunkenc.NewMemChunk(chunkenc.EncGZIP, f, conf.BlockSize, conf.ChunkTargetSize, conf.ChunkMaxSize, conf.ChunkMinTime)
 					fillChunk(t, c)
 					if close {
 						require.Nil(t, c.Close())
@@ -309,7 +309,7 @@ func Test_EncodingChunks(t *testing.T) {
 
 func Test_EncodingCheckpoint(t *testing.T) {
 	conf := dummyConf()
-	c := chunkenc.NewMemChunk(chunkenc.EncGZIP, chunkenc.UnorderedHeadBlockFmt, conf.BlockSize, conf.TargetChunkSize)
+	c := chunkenc.NewMemChunk(chunkenc.EncGZIP, chunkenc.UnorderedHeadBlockFmt, conf.BlockSize, conf.ChunkTargetSize, conf.ChunkMaxSize, conf.ChunkMinTime)
 	require.Nil(t, c.Append(&logproto.Entry{
 		Timestamp: time.Unix(1, 0),
 		Line:      "hi there",

@@ -383,7 +383,7 @@ func (i *Ingester) flushChunks(ctx context.Context, fp model.Fingerprint, labelP
 			firstTime, lastTime := loki_util.RoundToMilliseconds(c.chunk.Bounds())
 			ch := chunk.NewChunk(
 				userID, fp, metric,
-				chunkenc.NewFacade(c.chunk, i.cfg.BlockSize, i.cfg.TargetChunkSize),
+				chunkenc.NewFacade(c.chunk, i.cfg.BlockSize, i.cfg.ChunkTargetSize, i.cfg.ChunkMaxSize, i.cfg.ChunkMinTime),
 				firstTime,
 				lastTime,
 			)

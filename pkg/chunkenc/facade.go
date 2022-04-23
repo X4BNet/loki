@@ -2,6 +2,7 @@ package chunkenc
 
 import (
 	"io"
+	"time"
 
 	"github.com/prometheus/common/model"
 
@@ -29,15 +30,19 @@ type Facade struct {
 	c          Chunk
 	blockSize  int
 	targetSize int
+	maxSize    int
+	minTime    time.Duration
 	encoding.Chunk
 }
 
 // NewFacade makes a new Facade.
-func NewFacade(c Chunk, blockSize, targetSize int) encoding.Chunk {
+func NewFacade(c Chunk, blockSize, targetSize int, maxSize int, minTime time.Duration) encoding.Chunk {
 	return &Facade{
 		c:          c,
 		blockSize:  blockSize,
 		targetSize: targetSize,
+		maxSize:    maxSize,
+		minTime:    minTime,
 	}
 }
 
@@ -55,7 +60,7 @@ func (f Facade) Marshal(w io.Writer) error {
 // UnmarshalFromBuf implements encoding.Chunk.
 func (f *Facade) UnmarshalFromBuf(buf []byte) error {
 	var err error
-	f.c, err = NewByteChunk(buf, f.blockSize, f.targetSize)
+	f.c, err = NewByteChunk(buf, f.blockSize, f.targetSize, f.maxSize, f.minTime)
 	return err
 }
 
