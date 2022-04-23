@@ -639,12 +639,12 @@ func (c *MemChunk) SpaceFor(e *logproto.Entry) bool {
 		newSize := c.head.UncompressedSize() + len(e.Line) + c.cutBlockSize
 		if newSize > c.targetSize {
 			minTime, _ := c.Bounds()
-			if c.minTime > time.Since(minTime) {
+			if c.minTime < time.Since(minTime) {
 				return true
 			}
 			return (newSize < c.maxSize)
 		}
-		return false
+		return true
 	}
 	// if targetSize is not defined, default to the original behavior of fixed blocks per chunk
 	return len(c.blocks) < blocksPerChunk
