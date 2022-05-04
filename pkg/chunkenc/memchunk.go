@@ -530,7 +530,7 @@ func (c *MemChunk) WriteTo(w io.Writer) (int64, error) {
 		offset += int64(n)
 
 		// We are done with the block data now
-		unix.Madvise(b.b, 21)
+		b.Pageout()
 	}
 
 	metasOffset := offset
@@ -1030,6 +1030,10 @@ func (b block) MaxTime() int64 {
 	return b.maxt
 }
 
+func (b block) Pageout() {
+	unix.Madvise(b.b, 21)
+}
+
 func (hb *headBlock) Iterator(ctx context.Context, direction logproto.Direction, mint, maxt int64, pipeline log.StreamPipeline) iter.EntryIterator {
 	if hb.IsEmpty() || (maxt < hb.mint || hb.maxt < mint) {
 		return iter.NoopIterator
@@ -1259,7 +1263,7 @@ func (si *bufferedIterator) Error() error { return si.err }
 
 func (si *bufferedIterator) Close() error {
 	if !si.closed {
-		unix.Madvise(si.block.b, 21)
+		si.block.Pageout()
 		si.closed = true
 		si.close()
 	}
@@ -1318,6 +1322,11 @@ func (e *entryBufferedIterator) Next() bool {
 		return true
 	}
 	return false
+
+}
+func (e *entryBufferedIterator) Close() error {
+	e.block.Pageout()
+	return nil
 }
 
 func newSampleIterator(ctx context.Context, pool ReaderPool, b *block, extractor log.StreamSampleExtractor) iter.SampleIterator {
