@@ -1325,8 +1325,7 @@ func (e *entryBufferedIterator) Next() bool {
 
 }
 func (e *entryBufferedIterator) Close() error {
-	e.block.Pageout()
-	return nil
+	return e.bufferedIterator.Close()
 }
 
 func newSampleIterator(ctx context.Context, pool ReaderPool, b *block, extractor log.StreamSampleExtractor) iter.SampleIterator {
