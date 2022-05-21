@@ -335,7 +335,7 @@ func BenchmarkHeadBlockWrites(b *testing.B) {
 }
 
 func TestUnorderedChunkIterators(t *testing.T) {
-	c := NewMemChunk(EncSnappy, UnorderedHeadBlockFmt, testBlockSize, testTargetSize)
+	c := NewMemChunk(EncSnappy, UnorderedHeadBlockFmt, testBlockSize, testTargetSize, testTargetSize, time.Minute)
 	for i := 0; i < 100; i++ {
 		// push in reverse order
 		require.Nil(t, c.Append(&logproto.Entry{
@@ -345,7 +345,7 @@ func TestUnorderedChunkIterators(t *testing.T) {
 
 		// ensure we have a mix of cut blocks + head block.
 		if i%30 == 0 {
-			require.Nil(t, c.cut())
+			require.Nil(t, c.Cut())
 		}
 	}
 
@@ -391,11 +391,11 @@ func TestUnorderedChunkIterators(t *testing.T) {
 }
 
 func BenchmarkUnorderedRead(b *testing.B) {
-	legacy := NewMemChunk(EncSnappy, OrderedHeadBlockFmt, testBlockSize, testTargetSize)
+	legacy := NewMemChunk(EncSnappy, OrderedHeadBlockFmt, testBlockSize, testTargetSize, testTargetSize, time.Minute)
 	fillChunkClose(legacy, false)
-	ordered := NewMemChunk(EncSnappy, UnorderedHeadBlockFmt, testBlockSize, testTargetSize)
+	ordered := NewMemChunk(EncSnappy, UnorderedHeadBlockFmt, testBlockSize, testTargetSize, testTargetSize, time.Minute)
 	fillChunkClose(ordered, false)
-	unordered := NewMemChunk(EncSnappy, UnorderedHeadBlockFmt, testBlockSize, testTargetSize)
+	unordered := NewMemChunk(EncSnappy, UnorderedHeadBlockFmt, testBlockSize, testTargetSize, testTargetSize, time.Minute)
 	fillChunkRandomOrder(unordered, false)
 
 	tcs := []struct {
@@ -453,7 +453,7 @@ func BenchmarkUnorderedRead(b *testing.B) {
 }
 
 func TestUnorderedIteratorCountsAllEntries(t *testing.T) {
-	c := NewMemChunk(EncSnappy, UnorderedHeadBlockFmt, testBlockSize, testTargetSize)
+	c := NewMemChunk(EncSnappy, UnorderedHeadBlockFmt, testBlockSize, testTargetSize, testTargetSize, time.Minute)
 	fillChunkRandomOrder(c, false)
 
 	ct := 0
@@ -490,7 +490,7 @@ func TestUnorderedIteratorCountsAllEntries(t *testing.T) {
 }
 
 func chunkFrom(xs []logproto.Entry) ([]byte, error) {
-	c := NewMemChunk(EncSnappy, OrderedHeadBlockFmt, testBlockSize, testTargetSize)
+	c := NewMemChunk(EncSnappy, OrderedHeadBlockFmt, testBlockSize, testTargetSize, testTargetSize, time.Minute)
 	for _, x := range xs {
 		if err := c.Append(&x); err != nil {
 			return nil, err
@@ -550,7 +550,7 @@ func TestReorder(t *testing.T) {
 		},
 	} {
 		t.Run(tc.desc, func(t *testing.T) {
-			c := NewMemChunk(EncSnappy, UnorderedHeadBlockFmt, testBlockSize, testTargetSize)
+			c := NewMemChunk(EncSnappy, UnorderedHeadBlockFmt, testBlockSize, testTargetSize, testTargetSize, time.Minute)
 			for _, x := range tc.input {
 				require.Nil(t, c.Append(&x))
 			}
@@ -567,7 +567,7 @@ func TestReorder(t *testing.T) {
 }
 
 func TestReorderAcrossBlocks(t *testing.T) {
-	c := NewMemChunk(EncSnappy, UnorderedHeadBlockFmt, testBlockSize, testTargetSize)
+	c := NewMemChunk(EncSnappy, UnorderedHeadBlockFmt, testBlockSize, testTargetSize, testTargetSize, time.Minute)
 	for _, batch := range [][]int{
 		// ensure our blocks have overlapping bounds and must be reordered
 		// before closing.
@@ -580,7 +580,7 @@ func TestReorderAcrossBlocks(t *testing.T) {
 				Line:      fmt.Sprint(x),
 			}))
 		}
-		require.Nil(t, c.cut())
+		require.Nil(t, c.Cut())
 	}
 	// get bounds before it's reordered
 	from, to := c.Bounds()

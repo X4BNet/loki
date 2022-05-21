@@ -76,8 +76,12 @@ type Config struct {
 	FlushOpTimeout      time.Duration     `yaml:"flush_op_timeout"`
 	RetainPeriod        time.Duration     `yaml:"chunk_retain_period"`
 	MaxChunkIdle        time.Duration     `yaml:"chunk_idle_period"`
+	MaxBlockIdle        time.Duration     `yaml:"block_idle_period"`
+	MinBlockIdleSize    int               `yaml:"block_idle_size"`
 	BlockSize           int               `yaml:"chunk_block_size"`
-	TargetChunkSize     int               `yaml:"chunk_target_size"`
+	ChunkTargetSize     int               `yaml:"chunk_target_size"`
+	ChunkMaxSize        int               `yaml:"chunk_max_size"`
+	ChunkMinTime        time.Duration     `yaml:"chunk_min_time"`
 	ChunkEncoding       string            `yaml:"chunk_encoding"`
 	parsedEncoding      chunkenc.Encoding `yaml:"-"` // placeholder for validated encoding
 	MaxChunkAge         time.Duration     `yaml:"max_chunk_age"`
@@ -117,9 +121,13 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 	f.DurationVar(&cfg.FlushOpTimeout, "ingester.flush-op-timeout", 10*time.Minute, "")
 	f.DurationVar(&cfg.RetainPeriod, "ingester.chunks-retain-period", 0, "")
 	f.DurationVar(&cfg.MaxChunkIdle, "ingester.chunks-idle-period", 30*time.Minute, "")
+	f.DurationVar(&cfg.MaxBlockIdle, "ingester.block-idle-period", 1*time.Hour, "")
+	f.IntVar(&cfg.MinBlockIdleSize, "ingester.block-idle-size", 128*1024, "")
 	f.IntVar(&cfg.BlockSize, "ingester.chunks-block-size", 256*1024, "")
-	f.IntVar(&cfg.TargetChunkSize, "ingester.chunk-target-size", 1572864, "") // 1.5 MB
+	f.IntVar(&cfg.ChunkTargetSize, "ingester.chunk-target-size", 1572864, "") // 1.5 MB
 	f.StringVar(&cfg.ChunkEncoding, "ingester.chunk-encoding", chunkenc.EncGZIP.String(), fmt.Sprintf("The algorithm to use for compressing chunk. (%s)", chunkenc.SupportedEncoding()))
+	f.IntVar(&cfg.ChunkMaxSize, "ingester.chunk-max-size", 1572864, "") // 1.5 MB
+	f.DurationVar(&cfg.ChunkMinTime, "ingester.chunk-min-time", 10*time.Minute, "")
 	f.DurationVar(&cfg.SyncPeriod, "ingester.sync-period", 0, "How often to cut chunks to synchronize ingesters.")
 	f.Float64Var(&cfg.SyncMinUtilization, "ingester.sync-min-utilization", 0, "Minimum utilization of chunk when doing synchronization.")
 	f.IntVar(&cfg.MaxReturnedErrors, "ingester.max-ignored-stream-errors", 10, "Maximum number of ignored stream errors to return. 0 to return all errors.")
@@ -228,7 +236,7 @@ func New(cfg Config, clientConfig client.Config, store ChunkStore, limits *valid
 		cfg.ingesterClientFactory = client.New
 	}
 	compressionStats.Set(cfg.ChunkEncoding)
-	targetSizeStats.Set(int64(cfg.TargetChunkSize))
+	targetSizeStats.Set(int64(cfg.ChunkTargetSize))
 	walStats.Set("disabled")
 	if cfg.WAL.Enabled {
 		walStats.Set("enabled")

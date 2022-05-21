@@ -10,6 +10,7 @@ import (
 	"hash/crc32"
 	"io"
 	"reflect"
+	"runtime"
 	"time"
 	"unsafe"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/grafana/loki/pkg/storage/chunk"
 	"github.com/grafana/loki/pkg/util/filter"
 	util_log "github.com/grafana/loki/pkg/util/log"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -104,8 +106,11 @@ type MemChunk struct {
 	// Target size in compressed bytes
 	targetSize int
 
+	maxSize int
+	minTime time.Duration
+
 	// The finished blocks.
-	blocks []block
+	blocks []*block
 	// The compressed size of all the blocks
 	cutBlockSize int
 
@@ -332,11 +337,13 @@ type entry struct {
 }
 
 // NewMemChunk returns a new in-mem chunk.
-func NewMemChunk(enc Encoding, head HeadBlockFmt, blockSize, targetSize int) *MemChunk {
+func NewMemChunk(enc Encoding, head HeadBlockFmt, blockSize, targetSize int, maxSize int, minTime time.Duration) *MemChunk {
 	return &MemChunk{
 		blockSize:  blockSize,  // The blockSize in bytes.
 		targetSize: targetSize, // Desired chunk size in compressed bytes
-		blocks:     []block{},
+		maxSize:    maxSize,
+		minTime:    minTime,
+		blocks:     []*block{},
 
 		format: DefaultChunkFormat,
 		head:   head.NewBlock(),
@@ -347,11 +354,13 @@ func NewMemChunk(enc Encoding, head HeadBlockFmt, blockSize, targetSize int) *Me
 }
 
 // NewByteChunk returns a MemChunk on the passed bytes.
-func NewByteChunk(b []byte, blockSize, targetSize int) (*MemChunk, error) {
+func NewByteChunk(b []byte, blockSize, targetSize int, maxSize int, minTime time.Duration) (*MemChunk, error) {
 	bc := &MemChunk{
 		head:       &headBlock{}, // Dummy, empty headblock.
 		blockSize:  blockSize,
 		targetSize: targetSize,
+		maxSize:    maxSize,
+		minTime:    minTime,
 	}
 	db := decbuf{b: b}
 
@@ -389,10 +398,10 @@ func NewByteChunk(b []byte, blockSize, targetSize int) (*MemChunk, error) {
 
 	// Read the number of blocks.
 	num := db.uvarint()
-	bc.blocks = make([]block, 0, num)
+	bc.blocks = make([]*block, 0, num)
 
 	for i := 0; i < num; i++ {
-		var blk block
+		blk := &block{}
 		// Read #entries.
 		blk.numEntries = db.uvarint()
 
@@ -522,6 +531,9 @@ func (c *MemChunk) WriteTo(w io.Writer) (int64, error) {
 			return offset, errors.Wrap(err, "write block")
 		}
 		offset += int64(n)
+
+		// We are done with the block data now
+		b.Pageout()
 	}
 
 	metasOffset := offset
@@ -585,8 +597,8 @@ func (c *MemChunk) CheckpointSize() (chunk, head int) {
 	return c.BytesSize(), c.head.CheckpointSize()
 }
 
-func MemchunkFromCheckpoint(chk, head []byte, desired HeadBlockFmt, blockSize int, targetSize int) (*MemChunk, error) {
-	mc, err := NewByteChunk(chk, blockSize, targetSize)
+func MemchunkFromCheckpoint(chk, head []byte, desired HeadBlockFmt, blockSize int, targetSize int, maxSize int, minTime time.Duration) (*MemChunk, error) {
+	mc, err := NewByteChunk(chk, blockSize, targetSize, maxSize, minTime)
 	if err != nil {
 		return nil, err
 	}
@@ -624,14 +636,22 @@ func (c *MemChunk) BlockCount() int {
 
 // SpaceFor implements Chunk.
 func (c *MemChunk) SpaceFor(e *logproto.Entry) bool {
-	if c.targetSize > 0 {
-		// This is looking to see if the uncompressed lines will fit which is not
-		// a great check, but it will guarantee we are always under the target size
-		newHBSize := c.head.UncompressedSize() + len(e.Line)
-		return (c.cutBlockSize + newHBSize) < c.targetSize
+	if c.targetSize <= 0 {
+		// if targetSize is not defined, default to the original behavior of fixed blocks per chunk
+		return len(c.blocks) < blocksPerChunk
 	}
-	// if targetSize is not defined, default to the original behavior of fixed blocks per chunk
-	return len(c.blocks) < blocksPerChunk
+
+	// This is looking to see if the uncompressed lines will fit which is not
+	// a great check, but it will guarantee we are always under the target size
+	newSize := c.head.UncompressedSize() + len(e.Line) + c.cutBlockSize
+	if newSize > c.targetSize {
+		if newSize > c.maxSize {
+			return false
+		}
+		minTime, _ := c.Bounds()
+		return e.Timestamp.Sub(minTime) < c.minTime
+	}
+	return true
 }
 
 // UncompressedSize implements Chunk.
@@ -645,6 +665,10 @@ func (c *MemChunk) UncompressedSize() int {
 	}
 
 	return size
+}
+
+func (c *MemChunk) HeadSize() int {
+	return c.head.UncompressedSize()
 }
 
 // CompressedSize implements Chunk.
@@ -680,7 +704,7 @@ func (c *MemChunk) Append(entry *logproto.Entry) error {
 	}
 
 	if c.head.UncompressedSize() >= c.blockSize {
-		return c.cut()
+		return c.Cut()
 	}
 
 	return nil
@@ -689,7 +713,7 @@ func (c *MemChunk) Append(entry *logproto.Entry) error {
 // Close implements Chunk.
 // TODO: Fix this to check edge cases.
 func (c *MemChunk) Close() error {
-	if err := c.cut(); err != nil {
+	if err := c.Cut(); err != nil {
 		return err
 	}
 	return c.reorder()
@@ -735,27 +759,49 @@ func (c *MemChunk) ConvertHead(desired HeadBlockFmt) error {
 	return nil
 }
 
+func finalizeBlock(b *block) {
+	err := MmapFree(b.b)
+	if err != nil {
+		panic(err)
+	}
+	b.b = nil
+}
+
 // cut a new block and add it to finished blocks.
-func (c *MemChunk) cut() error {
+func (c *MemChunk) Cut() error {
 	if c.head.IsEmpty() {
 		return nil
 	}
 
-	b, err := c.head.Serialise(getWriterPool(c.encoding))
+	buffer, err := c.head.Serialise(getWriterPool(c.encoding))
 	if err != nil {
 		return err
 	}
 
+	buffer2, err := MmapAlloc(len(buffer))
+	if err != nil {
+		return err
+	}
+	copy(buffer2, buffer)
+
+	// mmap must allocate at-least one page
+	// syscall.MADV_PAGEOUT is not defined
+	unix.Madvise(buffer2, 21)
+
 	mint, maxt := c.head.Bounds()
-	c.blocks = append(c.blocks, block{
-		b:                b,
+	blk := &block{
+		b:                buffer2,
 		numEntries:       c.head.Entries(),
 		mint:             mint,
 		maxt:             maxt,
 		uncompressedSize: c.head.UncompressedSize(),
-	})
+	}
 
-	c.cutBlockSize += len(b)
+	runtime.SetFinalizer(blk, finalizeBlock)
+
+	c.blocks = append(c.blocks, blk)
+
+	c.cutBlockSize += len(buffer)
 
 	c.head.Reset()
 	return nil
@@ -922,12 +968,12 @@ func (c *MemChunk) Rebound(start, end time.Time, filter filter.Func) (Chunk, err
 	// as close as possible, respect the block/target sizes specified. However,
 	// if the blockSize is not set, use reasonable defaults.
 	if c.blockSize > 0 {
-		newChunk = NewMemChunk(c.Encoding(), c.headFmt, c.blockSize, c.targetSize)
+		newChunk = NewMemChunk(c.Encoding(), c.headFmt, c.blockSize, c.targetSize, c.maxSize, c.minTime)
 	} else {
 		// Using defaultBlockSize for target block size.
 		// The alternative here could be going over all the blocks and using the size of the largest block as target block size but I(Sandeep) feel that it is not worth the complexity.
 		// For target chunk size I am using compressed size of original chunk since the newChunk should anyways be lower in size than that.
-		newChunk = NewMemChunk(c.Encoding(), c.headFmt, defaultBlockSize, c.CompressedSize())
+		newChunk = NewMemChunk(c.Encoding(), c.headFmt, defaultBlockSize, c.CompressedSize(), c.maxSize, c.minTime)
 	}
 
 	for itr.Next() {
@@ -957,21 +1003,21 @@ func (c *MemChunk) Rebound(start, end time.Time, filter filter.Func) (Chunk, err
 // chances of chunk<>block encoding drift in the codebase as the latter is parameterized by the former.
 type encBlock struct {
 	enc Encoding
-	block
+	*block
 }
 
 func (b encBlock) Iterator(ctx context.Context, pipeline log.StreamPipeline) iter.EntryIterator {
 	if len(b.b) == 0 {
 		return iter.NoopIterator
 	}
-	return newEntryIterator(ctx, getReaderPool(b.enc), b.b, pipeline)
+	return newEntryIterator(ctx, getReaderPool(b.enc), b.block, pipeline)
 }
 
 func (b encBlock) SampleIterator(ctx context.Context, extractor log.StreamSampleExtractor) iter.SampleIterator {
 	if len(b.b) == 0 {
 		return iter.NoopIterator
 	}
-	return newSampleIterator(ctx, getReaderPool(b.enc), b.b, extractor)
+	return newSampleIterator(ctx, getReaderPool(b.enc), b.block, extractor)
 }
 
 func (b block) Offset() int {
@@ -988,6 +1034,10 @@ func (b block) MinTime() int64 {
 
 func (b block) MaxTime() int64 {
 	return b.maxt
+}
+
+func (b block) Pageout() {
+	unix.Madvise(b.b, 21)
 }
 
 func (hb *headBlock) Iterator(ctx context.Context, direction logproto.Direction, mint, maxt int64, pipeline log.StreamPipeline) iter.EntryIterator {
@@ -1111,8 +1161,8 @@ func unsafeGetBytes(s string) []byte {
 }
 
 type bufferedIterator struct {
-	origBytes []byte
-	stats     *stats.Context
+	block *block
+	stats *stats.Context
 
 	bufReader *bufio.Reader
 	reader    io.Reader
@@ -1127,12 +1177,12 @@ type bufferedIterator struct {
 	closed bool
 }
 
-func newBufferedIterator(ctx context.Context, pool ReaderPool, b []byte) *bufferedIterator {
+func newBufferedIterator(ctx context.Context, pool ReaderPool, b *block) *bufferedIterator {
 	stats := stats.FromContext(ctx)
-	stats.AddCompressedBytes(int64(len(b)))
+	stats.AddCompressedBytes(int64(len(b.b)))
 	return &bufferedIterator{
 		stats:     stats,
-		origBytes: b,
+		block:     b,
 		reader:    nil, // will be initialized later
 		bufReader: nil, // will be initialized later
 		pool:      pool,
@@ -1146,7 +1196,7 @@ func (si *bufferedIterator) Next() bool {
 
 	if !si.closed && si.reader == nil {
 		// initialize reader now, hopefully reusing one of the previous readers
-		si.reader = si.pool.GetReader(bytes.NewBuffer(si.origBytes))
+		si.reader = si.pool.GetReader(bytes.NewBuffer(si.block.b))
 		si.bufReader = BufReaderPool.Get(si.reader)
 	}
 
@@ -1220,6 +1270,7 @@ func (si *bufferedIterator) Error() error { return si.err }
 
 func (si *bufferedIterator) Close() error {
 	if !si.closed {
+		si.block.Pageout()
 		si.closed = true
 		si.close()
 	}
@@ -1240,10 +1291,10 @@ func (si *bufferedIterator) close() {
 		BytesBufferPool.Put(si.buf)
 		si.buf = nil
 	}
-	si.origBytes = nil
+	si.block = nil
 }
 
-func newEntryIterator(ctx context.Context, pool ReaderPool, b []byte, pipeline log.StreamPipeline) iter.EntryIterator {
+func newEntryIterator(ctx context.Context, pool ReaderPool, b *block, pipeline log.StreamPipeline) iter.EntryIterator {
 	return &entryBufferedIterator{
 		bufferedIterator: newBufferedIterator(ctx, pool, b),
 		pipeline:         pipeline,
@@ -1284,9 +1335,13 @@ func (e *entryBufferedIterator) Next() bool {
 		return true
 	}
 	return false
+
+}
+func (e *entryBufferedIterator) Close() error {
+	return e.bufferedIterator.Close()
 }
 
-func newSampleIterator(ctx context.Context, pool ReaderPool, b []byte, extractor log.StreamSampleExtractor) iter.SampleIterator {
+func newSampleIterator(ctx context.Context, pool ReaderPool, b *block, extractor log.StreamSampleExtractor) iter.SampleIterator {
 	it := &sampleBufferedIterator{
 		bufferedIterator: newBufferedIterator(ctx, pool, b),
 		extractor:        extractor,
