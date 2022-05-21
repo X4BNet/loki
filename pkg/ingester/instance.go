@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/go-kit/log/level"
+	otlog "github.com/opentracing/opentracing-go/log"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -31,6 +32,7 @@ import (
 	"github.com/grafana/loki/pkg/util"
 	"github.com/grafana/loki/pkg/util/deletion"
 	util_log "github.com/grafana/loki/pkg/util/log"
+	"github.com/grafana/loki/pkg/util/spanlogger"
 	"github.com/grafana/loki/pkg/validation"
 )
 
@@ -361,10 +363,16 @@ func (i *instance) Query(ctx context.Context, req logql.SelectLogParams) (iter.E
 }
 
 func (i *instance) QuerySample(ctx context.Context, req logql.SelectSampleParams) (iter.SampleIterator, error) {
+	log, ctx := spanlogger.New(ctx, "instance.QuerySample")
+	log.Span.LogFields(otlog.String("params", req.Selector))
+	defer func() {
+		log.Span.Finish()
+	}()
 	expr, err := req.Expr()
 	if err != nil {
 		return nil, err
 	}
+	log.Span.LogFields(otlog.String("expr", expr.String()))
 
 	extractor, err := expr.Extractor()
 	if err != nil {

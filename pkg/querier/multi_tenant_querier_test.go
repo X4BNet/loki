@@ -260,6 +260,10 @@ func (it mockEntryIterator) Next() bool {
 	return true
 }
 
+func (it mockEntryIterator) ProcessLine() string {
+	panic("unsupported")
+}
+
 func (it mockEntryIterator) StreamHash() uint64 {
 	return 0
 }

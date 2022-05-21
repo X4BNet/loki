@@ -233,6 +233,11 @@ func (t *Loki) initQuerier() (services.Service, error) {
 	// Querier worker's max concurrent requests must be the same as the querier setting
 	t.Cfg.Worker.MaxConcurrentRequests = t.Cfg.Querier.MaxConcurrent
 
+	logger := log.With(util_log.Logger, "component", "querier")
+	var err error
+	if t.Cfg.Querier.PostFilterChunk {
+		t.Store.SetPostFetcherChunkFilterer(storage.NewRequestPostFetcherChunkFiltererForRequest(t.Cfg.Querier.PostFilterMaxParallel))
+	}
 	deleteStore, err := t.deleteRequestsStore()
 	if err != nil {
 		return nil, err
@@ -265,7 +270,6 @@ func (t *Loki) initQuerier() (services.Service, error) {
 		httpreq.ExtractQueryMetricsMiddleware(),
 	)
 
-	logger := log.With(util_log.Logger, "component", "querier")
 	t.querierAPI = querier.NewQuerierAPI(t.Cfg.Querier, t.Querier, t.overrides, logger)
 	queryHandlers := map[string]http.Handler{
 		"/loki/api/v1/query_range":         httpMiddleware.Wrap(http.HandlerFunc(t.querierAPI.RangeQueryHandler)),
