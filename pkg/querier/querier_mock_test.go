@@ -21,6 +21,7 @@ import (
 	"github.com/grafana/loki/pkg/iter"
 	"github.com/grafana/loki/pkg/logproto"
 	"github.com/grafana/loki/pkg/logql"
+	"github.com/grafana/loki/pkg/storage"
 	"github.com/grafana/loki/pkg/storage/chunk"
 	"github.com/grafana/loki/pkg/storage/chunk/fetcher"
 	"github.com/grafana/loki/pkg/storage/config"
@@ -261,6 +262,8 @@ func newStoreMock() *storeMock {
 }
 
 func (s *storeMock) SetChunkFilterer(chunk.RequestChunkFilterer) {}
+
+func (s *storeMock) SetPostFetcherChunkFilterer(storage.RequestPostFetcherChunkFilterer) {}
 
 func (s *storeMock) SelectLogs(ctx context.Context, req logql.SelectLogParams) (iter.EntryIterator, error) {
 	args := s.Called(ctx, req)
