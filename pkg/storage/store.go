@@ -7,13 +7,13 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
-	"github.com/grafana/dskit/tenant"
 	otlog "github.com/opentracing/opentracing-go/log"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/labels"
 
+	"github.com/grafana/dskit/tenant"
 	"github.com/grafana/loki/pkg/chunkenc"
 	"github.com/grafana/loki/pkg/iter"
 	"github.com/grafana/loki/pkg/logproto"
@@ -49,12 +49,12 @@ type Store interface {
 	stores.Store
 	SelectSamples(ctx context.Context, req logql.SelectSampleParams) (iter.SampleIterator, error)
 	SelectLogs(ctx context.Context, req logql.SelectLogParams) (iter.EntryIterator, error)
+
 	Series(ctx context.Context, req logql.SelectLogParams) ([]logproto.SeriesIdentifier, error)
 	GetSchemaConfigs() []config.PeriodConfig
 	SetChunkFilterer(chunkFilter chunk.RequestChunkFilterer)
 	SetPostFetcherChunkFilterer(requestPostFetcherChunkFilterer RequestPostFetcherChunkFilterer)
 }
-
 type store struct {
 	stores.Store
 	composite *stores.CompositeStore
@@ -377,7 +377,7 @@ func (c *chunkFiltererByExpr) pipelineExecChunk(ctx context.Context, cnk chunk.C
 		return nil, err
 	}
 	lokiChunk := chunkData.(*chunkenc.Facade).LokiChunk()
-	postFilterChunkData := chunkenc.NewMemChunk(lokiChunk.Encoding(), chunkenc.UnorderedHeadBlockFmt, cnk.Data.Size(), cnk.Data.Size())
+	postFilterChunkData := chunkenc.NewMemChunk(lokiChunk.Encoding(), chunkenc.UnorderedHeadBlockFmt, cnk.Data.Size(), cnk.Data.Size(), cnk.Data.Size(), time.Minute)
 	headChunkBytes := int64(0)
 	headChunkLine := int64(0)
 	decompressedLines := int64(0)
@@ -400,7 +400,7 @@ func (c *chunkFiltererByExpr) pipelineExecChunk(ctx context.Context, cnk chunk.C
 	firstTime, lastTime := util.RoundToMilliseconds(postFilterChunkData.Bounds())
 	postFilterCh := chunk.NewChunk(
 		cnk.UserID, cnk.FingerprintModel(), cnk.Metric,
-		chunkenc.NewFacade(postFilterChunkData, 0, 0),
+		chunkenc.NewFacade(postFilterChunkData, 0, 0, 0, time.Minute),
 		firstTime,
 		lastTime,
 	)

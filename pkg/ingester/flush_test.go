@@ -121,7 +121,7 @@ func buildChunkDecs(t testing.TB) []*chunkDesc {
 	for i := range res {
 		res[i] = &chunkDesc{
 			closed: true,
-			chunk:  chunkenc.NewMemChunk(chunkenc.EncSnappy, chunkenc.UnorderedHeadBlockFmt, dummyConf().BlockSize, dummyConf().TargetChunkSize),
+			chunk:  chunkenc.NewMemChunk(chunkenc.EncSnappy, chunkenc.UnorderedHeadBlockFmt, dummyConf().BlockSize, dummyConf().ChunkTargetSize, dummyConf().ChunkMaxSize, dummyConf().ChunkMinTime),
 		}
 		fillChunk(t, res[i].chunk)
 		require.NoError(t, res[i].chunk.Close())
@@ -279,6 +279,7 @@ func defaultIngesterTestConfig(t testing.TB) Config {
 	flagext.DefaultValues(&cfg)
 	cfg.FlushCheckPeriod = 99999 * time.Hour
 	cfg.MaxChunkIdle = 99999 * time.Hour
+	cfg.ChunkMinTime = 99999 * time.Hour
 	cfg.ConcurrentFlushes = 1
 	cfg.LifecyclerConfig.RingConfig.KVStore.Mock = kvClient
 	cfg.LifecyclerConfig.NumTokens = 1
@@ -288,7 +289,8 @@ func defaultIngesterTestConfig(t testing.TB) Config {
 	cfg.LifecyclerConfig.FinalSleep = 0
 	cfg.LifecyclerConfig.MinReadyDuration = 0
 	cfg.BlockSize = 256 * 1024
-	cfg.TargetChunkSize = 1500 * 1024
+	cfg.ChunkTargetSize = 1500 * 1024
+	cfg.ChunkMaxSize = 1500 * 1024
 	cfg.WAL.Enabled = false
 	return cfg
 }

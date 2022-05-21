@@ -251,7 +251,7 @@ func createChunk(t testing.TB, userID string, lbs labels.Labels, from model.Time
 	labelsBuilder.Set(labels.MetricName, "logs")
 	metric := labelsBuilder.Labels()
 	fp := ingesterclient.Fingerprint(lbs)
-	chunkEnc := chunkenc.NewMemChunk(chunkenc.EncSnappy, chunkenc.UnorderedHeadBlockFmt, blockSize, targetSize)
+	chunkEnc := chunkenc.NewMemChunk(chunkenc.EncSnappy, chunkenc.UnorderedHeadBlockFmt, blockSize, targetSize, targetSize, time.Minute)
 
 	for ts := from; !ts.After(through); ts = ts.Add(1 * time.Minute) {
 		require.NoError(t, chunkEnc.Append(&logproto.Entry{
@@ -261,7 +261,7 @@ func createChunk(t testing.TB, userID string, lbs labels.Labels, from model.Time
 	}
 
 	require.NoError(t, chunkEnc.Close())
-	c := chunk.NewChunk(userID, fp, metric, chunkenc.NewFacade(chunkEnc, blockSize, targetSize), from, through)
+	c := chunk.NewChunk(userID, fp, metric, chunkenc.NewFacade(chunkEnc, blockSize, targetSize, targetSize, time.Minute), from, through)
 	require.NoError(t, c.Encode())
 	return c
 }
