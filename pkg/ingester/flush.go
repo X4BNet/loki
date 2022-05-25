@@ -187,7 +187,9 @@ func (i *Ingester) sweepInstance(instance *instance, immediate, mayRemoveStreams
 			if flushCount > 50 {
 				flushQueueIndex := int(uint64(s.fp) % uint64(i.cfg.ConcurrentFlushes))
 				for {
-					time.Sleep(time.Second)
+					if !immediate {
+						time.Sleep(time.Second)
+					}
 					if i.flushQueues[flushQueueIndex].Length() < 2 {
 						break
 					}
@@ -220,7 +222,7 @@ func (i *Ingester) sweepStream(instance *instance, stream *stream, immediate boo
 		stream.fp, immediate,
 	})
 
-	if flushQueue.Length() > 100 {
+	if flushQueue.Length() > 100 && !immediate {
 		time.Sleep(time.Second)
 	}
 
