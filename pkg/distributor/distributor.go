@@ -386,12 +386,13 @@ func (d *Distributor) sendSamples(ctx context.Context, ingester ring.InstanceDes
 	//
 	// The use of atomic increments here guarantees only a single sendSamples
 	// goroutine will write to either channel.
+	done := false
 	for i := range streamTrackers {
 		if err != nil {
 			if streamTrackers[i].failed.Inc() <= int32(streamTrackers[i].maxFailures) {
 				continue
 			}
-			if pushTracker.samplesFailed.Inc() == 1 {
+			if !done && pushTracker.samplesFailed.Inc() == 1 {
 				pushTracker.err <- err
 			}
 		} else {
@@ -399,9 +400,12 @@ func (d *Distributor) sendSamples(ctx context.Context, ingester ring.InstanceDes
 				continue
 			}
 			if pushTracker.samplesPending.Dec() == 0 {
-				pushTracker.done <- struct{}{}
+				done = true
 			}
 		}
+	}
+	if done {
+		pushTracker.done <- struct{}{}
 	}
 }
 
