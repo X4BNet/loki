@@ -154,7 +154,7 @@ func (dm *DeleteRequestHandler) GetAllDeleteRequestsHandler(w http.ResponseWrite
 
 	deleteGroups, err := dm.deleteRequestsStore.GetAllDeleteRequestsForUser(ctx, userID)
 	if err != nil {
-		level.Error(util_log.Logger).Log("msg", "error getting delete requests from the store", "err", err)
+		//level.Error(util_log.Logger).Log("msg", "error getting delete requests from the store", "err", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
