@@ -581,6 +581,7 @@ func (i *instance) GetStats(ctx context.Context, req *logproto.IndexStatsRequest
 					res.Chunks++
 					res.Entries += uint64(chk.chunk.Size())
 					res.Bytes += uint64(chk.chunk.UncompressedSize())
+
 				}
 
 			}
