@@ -24,6 +24,9 @@ func MergeStats(xs ...*Stats) (s Stats) {
 		s.Chunks += x.Chunks
 		s.Bytes += x.Bytes
 		s.Entries += x.Entries
+		if s.End < x.End {
+			s.End = x.End
+		}
 
 	}
 	return s

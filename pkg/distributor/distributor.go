@@ -374,8 +374,9 @@ func (d *Distributor) Push(ctx context.Context, req *logproto.PushRequest) (*log
 		done: make(chan struct{}, 1), // buffer avoids blocking if caller terminates - sendSamples() only sends once on each
 		err:  make(chan error, 1),
 	}
-	tracker.samplesPending.Store(int32(len(streams)))
-	for ingester, samples := range samplesByIngester {
+
+	tracker.pending.Store(int32(len(streamsByIngester)))
+	for ingester, samples := range streamsByIngester {
 		go func(ingester ring.InstanceDesc, samples []*streamTracker) {
 			// Use a background context to make sure all ingesters get samples even if we return early
 			localCtx, cancel := context.WithTimeout(context.Background(), d.clientCfg.RemoteTimeout)
@@ -384,7 +385,7 @@ func (d *Distributor) Push(ctx context.Context, req *logproto.PushRequest) (*log
 			if sp := opentracing.SpanFromContext(ctx); sp != nil {
 				localCtx = opentracing.ContextWithSpan(localCtx, sp)
 			}
-			d.sendSamples(localCtx, ingester, samples, &tracker)
+			d.sendStreams(localCtx, ingester, samples, &tracker)
 		}(ingesterDescs[ingester], samples)
 	}
 	select {
@@ -521,31 +522,28 @@ func (d *Distributor) truncateLines(vContext validationContext, stream *logproto
 func (d *Distributor) sendStreams(ctx context.Context, ingester ring.InstanceDesc, streamTrackers []*streamTracker, pushTracker *pushTracker) {
 	err := d.sendStreamsErr(ctx, ingester, streamTrackers)
 
-	// If we succeed, decrement each stream's pending count by one.
-	// If we reach the required number of successful puts on this stream, then
-	// decrement the number of pending streams by one.
-	// If we successfully push all streams to min success ingesters, wake up the
-	// waiting rpc so it can return early. Similarly, track the number of errors,
-	// and if it exceeds maxFailures shortcut the waiting rpc.
+	// If we succeed, decrement each sample's pending count by one.  If we reach
+	// the required number of successful puts on this sample, then decrement the
+	// number of pending samples by one.  If we successfully push all samples to
+	// min success ingesters, wake up the waiting rpc so it can return early.
+	// Similarly, track the number of errors, and if it exceeds maxFailures
+	// shortcut the waiting rpc.
 	//
-	// The use of atomic increments here guarantees only a single sendStreams
+	// The use of atomic increments here guarantees only a single sendSamples
 	// goroutine will write to either channel.
 	for i := range streamTrackers {
 		if err != nil {
 			if streamTrackers[i].failed.Inc() <= int32(streamTrackers[i].maxFailures) {
 				continue
 			}
-			if pushTracker.streamsFailed.Inc() == 1 {
+			if pushTracker.samplesFailed.Inc() == 1 {
 				pushTracker.err <- err
-			}
-		} else {
-			if streamTrackers[i].succeeded.Inc() != int32(streamTrackers[i].minSuccess) {
-				continue
-			}
-			if pushTracker.samplesPending.Dec() == 0 {
-				pushTracker.done <- struct{}{}
+				return
 			}
 		}
+	}
+	if pushTracker.pending.Dec() == 0 {
+		pushTracker.done <- struct{}{}
 	}
 }
 

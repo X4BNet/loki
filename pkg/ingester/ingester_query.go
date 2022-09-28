@@ -51,13 +51,7 @@ func (q *IngesterQuery) ReleaseAck() {
 	q.loopAck <- struct{}{}
 }
 
-// QuerierQueryServer is the GRPC server stream we use to send batch of entries.
-type QuerierQueryServer interface {
-	Context() context.Context
-	Send(res *logproto.QueryResponse) error
-}
-
-func (q *IngesterQuery) SendBatches(ctx context.Context, i iter.EntryIterator, queryServer QuerierQueryServer, limit int32) error {
+func (q *IngesterQuery) SendBatches(ctx context.Context, i iter.EntryIterator, queryServer QuerierQueryServer, limit int32, queryBatchSize uint32) error {
 	stats := stats.FromContext(ctx)
 
 	// send until the limit is reached.
@@ -98,7 +92,7 @@ func (q *IngesterQuery) SendBatches(ctx context.Context, i iter.EntryIterator, q
 	return nil
 }
 
-func (q *IngesterQuery) SendSampleBatches(ctx context.Context, it iter.SampleIterator, queryServer logproto.Querier_QuerySampleServer) error {
+func (q *IngesterQuery) SendSampleBatches(ctx context.Context, it iter.SampleIterator, queryServer logproto.Querier_QuerySampleServer, queryBatchSampleSize uint32) error {
 	stats := stats.FromContext(ctx)
 	for !isDone(ctx) {
 		q.BackpressureWait(ctx)
