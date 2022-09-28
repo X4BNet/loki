@@ -583,7 +583,7 @@ func (i *instance) GetStats(ctx context.Context, req *logproto.IndexStatsRequest
 					res.Bytes += uint64(chk.chunk.UncompressedSize())
 					_, to := chk.chunk.Bounds()
 					if res.End.UnixNano() < to.UnixNano() {
-						res.End = model.TimeFromUnix(to.UnixNano())
+						res.End = model.TimeFromUnixNano(to.UnixNano())
 					}
 				}
 
