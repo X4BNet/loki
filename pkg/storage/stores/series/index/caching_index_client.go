@@ -204,7 +204,6 @@ func (s *cachingIndexClient) queryPages(ctx context.Context, queries []Query, ca
 		var cardinalityErr error
 		for key, batch := range results {
 			cardinality := int32(len(batch.Entries))
-			level.Warn(logger).Log("msg", "debug IndexClient queryPages batch info", "Key", key, "cardinality", cardinality, "cardinalityLimit", cardinalityLimit)
 			if cardinalityLimit > 0 && cardinality > cardinalityLimit {
 				batch.Cardinality = cardinality
 				batch.Entries = nil
