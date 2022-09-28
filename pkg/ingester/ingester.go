@@ -659,7 +659,7 @@ func (i *Ingester) Ack(ctx context.Context, req *logproto.AckRequest) (*logproto
 		return &logproto.AckResponse{}, err
 	}
 
-	instance := i.GetOrCreateInstance(instanceID)
+	instance, err := i.GetOrCreateInstance(instanceID)
 	if err != nil {
 		return &logproto.AckResponse{}, err
 	}
