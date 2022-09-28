@@ -12,6 +12,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/common/sigv4"
+	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/rulefmt"
 	"github.com/prometheus/prometheus/model/timestamp"
@@ -41,6 +43,7 @@ type RulesLimits interface {
 	RulerRemoteWriteTimeout(userID string) time.Duration
 	RulerRemoteWriteHeaders(userID string) map[string]string
 	RulerRemoteWriteRelabelConfigs(userID string) []*util.RelabelConfig
+	RulerRemoteWriteConfig(userID string, id string) *config.RemoteWriteConfig
 	RulerRemoteWriteQueueCapacity(userID string) int
 	RulerRemoteWriteQueueMinShards(userID string) int
 	RulerRemoteWriteQueueMaxShards(userID string) int
@@ -49,6 +52,7 @@ type RulesLimits interface {
 	RulerRemoteWriteQueueMinBackoff(userID string) time.Duration
 	RulerRemoteWriteQueueMaxBackoff(userID string) time.Duration
 	RulerRemoteWriteQueueRetryOnRateLimit(userID string) bool
+	RulerRemoteWriteSigV4Config(userID string) *sigv4.SigV4Config
 }
 
 // engineQueryFunc returns a new query function using the rules.EngineQueryFunc function

@@ -5,6 +5,7 @@ import (
 	"path"
 
 	"github.com/grafana/loki/operator/internal/manifests/internal/config"
+	"github.com/grafana/loki/operator/internal/manifests/storage"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -19,16 +20,20 @@ import (
 // BuildCompactor builds the k8s objects required to run Loki Compactor.
 func BuildCompactor(opts Options) ([]client.Object, error) {
 	statefulSet := NewCompactorStatefulSet(opts)
-	if opts.Flags.EnableTLSServiceMonitorConfig {
-		if err := configureCompactorServiceMonitorPKI(statefulSet, opts.Name); err != nil {
+	if opts.Gates.HTTPEncryption {
+		if err := configureCompactorHTTPServicePKI(statefulSet, opts.Name); err != nil {
 			return nil, err
 		}
 	}
 
-	storageType := opts.Stack.Storage.Secret.Type
-	secretName := opts.Stack.Storage.Secret.Name
-	if err := configureStatefulSetForStorageType(statefulSet, storageType, secretName); err != nil {
+	if err := storage.ConfigureStatefulSet(statefulSet, opts.ObjectStorage); err != nil {
 		return nil, err
+	}
+
+	if opts.Gates.GRPCEncryption {
+		if err := configureCompactorGRPCServicePKI(statefulSet, opts.Name); err != nil {
+			return nil, err
+		}
 	}
 
 	return []client.Object{
@@ -41,6 +46,7 @@ func BuildCompactor(opts Options) ([]client.Object, error) {
 // NewCompactorStatefulSet creates a statefulset object for a compactor.
 func NewCompactorStatefulSet(opts Options) *appsv1.StatefulSet {
 	podSpec := corev1.PodSpec{
+		Affinity: defaultAffinity(opts.Gates.DefaultNodeAffinity),
 		Volumes: []corev1.Volume{
 			{
 				Name: configVolumeName,
@@ -96,8 +102,10 @@ func NewCompactorStatefulSet(opts Options) *appsv1.StatefulSet {
 				TerminationMessagePath:   "/dev/termination-log",
 				TerminationMessagePolicy: "File",
 				ImagePullPolicy:          "IfNotPresent",
+				SecurityContext:          containerSecurityContext(),
 			},
 		},
+		SecurityContext: podSecurityContext(opts.Gates.RuntimeSeccompProfile),
 	}
 
 	if opts.Stack.Template != nil && opts.Stack.Template.Compactor != nil {
@@ -158,7 +166,8 @@ func NewCompactorStatefulSet(opts Options) *appsv1.StatefulSet {
 
 // NewCompactorGRPCService creates a k8s service for the compactor GRPC endpoint
 func NewCompactorGRPCService(opts Options) *corev1.Service {
-	l := ComponentLabels(LabelCompactorComponent, opts.Name)
+	serviceName := serviceNameCompactorGRPC(opts.Name)
+	labels := ComponentLabels(LabelCompactorComponent, opts.Name)
 
 	return &corev1.Service{
 		TypeMeta: metav1.TypeMeta{
@@ -166,8 +175,9 @@ func NewCompactorGRPCService(opts Options) *corev1.Service {
 			APIVersion: corev1.SchemeGroupVersion.String(),
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   serviceNameCompactorGRPC(opts.Name),
-			Labels: l,
+			Name:        serviceName,
+			Labels:      labels,
+			Annotations: serviceAnnotations(serviceName, opts.Gates.OpenShift.ServingCertsService),
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: "None",
@@ -179,7 +189,7 @@ func NewCompactorGRPCService(opts Options) *corev1.Service {
 					TargetPort: intstr.IntOrString{IntVal: grpcPort},
 				},
 			},
-			Selector: l,
+			Selector: labels,
 		},
 	}
 }
@@ -187,8 +197,7 @@ func NewCompactorGRPCService(opts Options) *corev1.Service {
 // NewCompactorHTTPService creates a k8s service for the ingester HTTP endpoint
 func NewCompactorHTTPService(opts Options) *corev1.Service {
 	serviceName := serviceNameCompactorHTTP(opts.Name)
-	l := ComponentLabels(LabelCompactorComponent, opts.Name)
-	a := serviceAnnotations(serviceName, opts.Flags.EnableCertificateSigningService)
+	labels := ComponentLabels(LabelCompactorComponent, opts.Name)
 
 	return &corev1.Service{
 		TypeMeta: metav1.TypeMeta{
@@ -197,8 +206,8 @@ func NewCompactorHTTPService(opts Options) *corev1.Service {
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        serviceName,
-			Labels:      l,
-			Annotations: a,
+			Labels:      labels,
+			Annotations: serviceAnnotations(serviceName, opts.Gates.OpenShift.ServingCertsService),
 		},
 		Spec: corev1.ServiceSpec{
 			Ports: []corev1.ServicePort{
@@ -209,12 +218,17 @@ func NewCompactorHTTPService(opts Options) *corev1.Service {
 					TargetPort: intstr.IntOrString{IntVal: httpPort},
 				},
 			},
-			Selector: l,
+			Selector: labels,
 		},
 	}
 }
 
-func configureCompactorServiceMonitorPKI(statefulSet *appsv1.StatefulSet, stackName string) error {
+func configureCompactorHTTPServicePKI(statefulSet *appsv1.StatefulSet, stackName string) error {
 	serviceName := serviceNameCompactorHTTP(stackName)
-	return configureServiceMonitorPKI(&statefulSet.Spec.Template.Spec, serviceName)
+	return configureHTTPServicePKI(&statefulSet.Spec.Template.Spec, serviceName)
+}
+
+func configureCompactorGRPCServicePKI(sts *appsv1.StatefulSet, stackName string) error {
+	serviceName := serviceNameCompactorGRPC(stackName)
+	return configureGRPCServicePKI(&sts.Spec.Template.Spec, serviceName)
 }

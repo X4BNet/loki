@@ -1,24 +1,22 @@
 package storage
 
 import (
-	"bytes"
 	"context"
-	"strings"
+
+	"fmt"
+	"math"
 	"time"
 
 	"github.com/go-kit/log"
-	otlog "github.com/opentracing/opentracing-go/log"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/labels"
 
 	"github.com/grafana/dskit/tenant"
-	"github.com/grafana/loki/pkg/chunkenc"
 	"github.com/grafana/loki/pkg/iter"
 	"github.com/grafana/loki/pkg/logproto"
 	"github.com/grafana/loki/pkg/logql"
-	"github.com/grafana/loki/pkg/logql/syntax"
 	"github.com/grafana/loki/pkg/logqlmodel/stats"
 	"github.com/grafana/loki/pkg/querier/astmapper"
 	"github.com/grafana/loki/pkg/storage/chunk"
@@ -27,21 +25,24 @@ import (
 	"github.com/grafana/loki/pkg/storage/chunk/fetcher"
 	"github.com/grafana/loki/pkg/storage/config"
 	"github.com/grafana/loki/pkg/storage/stores"
+	"github.com/grafana/loki/pkg/storage/stores/index"
+	"github.com/grafana/loki/pkg/storage/stores/indexshipper"
+	"github.com/grafana/loki/pkg/storage/stores/indexshipper/gatewayclient"
 	"github.com/grafana/loki/pkg/storage/stores/series"
-	"github.com/grafana/loki/pkg/storage/stores/series/index"
-	"github.com/grafana/loki/pkg/storage/stores/shipper"
+	series_index "github.com/grafana/loki/pkg/storage/stores/series/index"
 	"github.com/grafana/loki/pkg/storage/stores/shipper/indexgateway"
 	"github.com/grafana/loki/pkg/storage/stores/tsdb"
 	"github.com/grafana/loki/pkg/usagestats"
 	"github.com/grafana/loki/pkg/util"
 	"github.com/grafana/loki/pkg/util/deletion"
-	"github.com/grafana/loki/pkg/util/spanlogger"
 )
 
 var (
 	indexTypeStats  = usagestats.NewString("store_index_type")
 	objectTypeStats = usagestats.NewString("store_object_type")
 	schemaStats     = usagestats.NewString("store_schema")
+
+	errWritingChunkUnsupported = errors.New("writing chunks is not supported while running store in read-only mode")
 )
 
 // Store is the Loki chunk store to retrieve and save chunks.
@@ -54,6 +55,7 @@ type Store interface {
 	GetSchemaConfigs() []config.PeriodConfig
 	SetChunkFilterer(chunkFilter chunk.RequestChunkFilterer)
 	SetPostFetcherChunkFilterer(requestPostFetcherChunkFilterer RequestPostFetcherChunkFilterer)
+	SetPostFetcherChunkMetricsFilterer(requestPostFetcherChunkFilterer RequestPostFetcherChunkFilterer)
 }
 type store struct {
 	stores.Store
@@ -68,10 +70,11 @@ type store struct {
 	clientMetrics      ClientMetrics
 	registerer         prometheus.Registerer
 
-	indexReadCache                  cache.Cache
-	chunksCache                     cache.Cache
-	writeDedupeCache                cache.Cache
-	requestPostFetcherChunkFilterer RequestPostFetcherChunkFilterer
+	indexReadCache                         cache.Cache
+	chunksCache                            cache.Cache
+	writeDedupeCache                       cache.Cache
+	requestPostFetcherChunkFilterer        RequestPostFetcherChunkFilterer
+	requestPostFetcherChunkMetricsFilterer RequestPostFetcherChunkFilterer
 
 	limits StoreLimits
 	logger log.Logger
@@ -91,19 +94,19 @@ func NewStore(cfg Config, storeCfg config.ChunkStoreConfig, schemaCfg config.Sch
 		}
 	}
 
-	indexReadCache, err := cache.New(cfg.IndexQueriesCacheConfig, registerer, logger)
+	indexReadCache, err := cache.New(cfg.IndexQueriesCacheConfig, registerer, logger, stats.IndexCache)
 	if err != nil {
 		return nil, err
 	}
 
-	writeDedupeCache, err := cache.New(storeCfg.WriteDedupeCacheConfig, registerer, logger)
+	writeDedupeCache, err := cache.New(storeCfg.WriteDedupeCacheConfig, registerer, logger, stats.WriteDedupeCache)
 	if err != nil {
 		return nil, err
 	}
 
 	chunkCacheCfg := storeCfg.ChunkCacheConfig
 	chunkCacheCfg.Prefix = "chunks"
-	chunksCache, err := cache.New(chunkCacheCfg, registerer, logger)
+	chunksCache, err := cache.New(chunkCacheCfg, registerer, logger, stats.ChunkCache)
 	if err != nil {
 		return nil, err
 	}
@@ -192,266 +195,12 @@ func (s *store) chunkClientForPeriod(p config.PeriodConfig) (client.Client, erro
 	return chunks, nil
 }
 
-// RequestChunkFilterer creates ChunkFilterer for a given request context.
-type RequestPostFetcherChunkFilterer interface {
-	ForRequest(req *logproto.QueryRequest) PostFetcherChunkFilterer
-	ForSampleRequest(req *logproto.SampleQueryRequest) PostFetcherChunkFilterer
-}
-
-// PostFetcherChunkFilterer filters chunks based on pipeline for log selector expr.
-type PostFetcherChunkFilterer interface {
-	PostFetchFilter(ctx context.Context, chunks []chunk.Chunk, s config.SchemaConfig) ([]chunk.Chunk, []string, error)
-	SetQueryRangeTime(from time.Time, through time.Time, nextChunk *LazyChunk)
-}
-
-type requestPostFetcherChunkFilterer struct {
-	maxParallelPipelineChunk int
-}
-
-func NewRequestPostFetcherChunkFiltererForRequest(maxParallelPipelineChunk int) RequestPostFetcherChunkFilterer {
-	return &requestPostFetcherChunkFilterer{maxParallelPipelineChunk: maxParallelPipelineChunk}
-}
-func (c *requestPostFetcherChunkFilterer) ForRequest(req *logproto.QueryRequest) PostFetcherChunkFilterer {
-	return &chunkFiltererByExpr{selector: req.Selector, direction: req.Direction, maxParallelPipelineChunk: c.maxParallelPipelineChunk}
-}
-
-func (c *requestPostFetcherChunkFilterer) ForSampleRequest(sampleReq *logproto.SampleQueryRequest) PostFetcherChunkFilterer {
-	return &chunkFiltererByExpr{selector: sampleReq.Selector, direction: logproto.FORWARD, isSampleExpr: true, maxParallelPipelineChunk: c.maxParallelPipelineChunk}
-}
-
-type chunkFiltererByExpr struct {
-	isSampleExpr             bool
-	maxParallelPipelineChunk int
-	direction                logproto.Direction
-	selector                 string
-	from                     time.Time
-	through                  time.Time
-	nextChunk                *LazyChunk
-}
-
-func (c *chunkFiltererByExpr) SetQueryRangeTime(from time.Time, through time.Time, nextChunk *LazyChunk) {
-	c.from = from
-	c.through = through
-	c.nextChunk = nextChunk
-}
-
-func (c *chunkFiltererByExpr) PostFetchFilter(ctx context.Context, chunks []chunk.Chunk, s config.SchemaConfig) ([]chunk.Chunk, []string, error) {
-	if len(chunks) == 0 {
-		return chunks, nil, nil
-	}
-	postFilterChunkLen := 0
-	log, ctx := spanlogger.New(ctx, "Batch.ParallelPostFetchFilter")
-	log.Span.LogFields(otlog.Int("chunks", len(chunks)))
-	defer func() {
-		log.Span.LogFields(otlog.Int("postFilterChunkLen", postFilterChunkLen))
-		log.Span.Finish()
-	}()
-
-	var postFilterLogSelector syntax.LogSelectorExpr
-	var queryLogql string
-	if c.isSampleExpr {
-		sampleExpr, err := syntax.ParseSampleExpr(c.selector)
-		if err != nil {
-			return nil, nil, err
-		}
-		queryLogql = sampleExpr.String()
-		postFilterLogSelector = sampleExpr.Selector()
-	} else {
-		logSelector, err := syntax.ParseLogSelector(c.selector, true)
-		if err != nil {
-			return nil, nil, err
-		}
-		queryLogql = logSelector.String()
-		postFilterLogSelector = logSelector
-	}
-
-	if !postFilterLogSelector.HasFilter() {
-		return chunks, nil, nil
-	}
-	preFilterLogql := postFilterLogSelector.String()
-	log.Span.SetTag("postFilter", true)
-	log.Span.LogFields(otlog.String("logql", queryLogql))
-	log.Span.LogFields(otlog.String("postFilterPreFilterLogql", preFilterLogql))
-	removeLineFmtAbel := false
-	if strings.Contains(preFilterLogql, "line_format") {
-		removeLineFmt(postFilterLogSelector)
-		removeLineFmtAbel = true
-		log.Span.LogFields(otlog.String("resultPostFilterPreFilterLogql", postFilterLogSelector.String()))
-	}
-	log.Span.SetTag("remove_line_format", removeLineFmtAbel)
-	result := make([]chunk.Chunk, 0)
-	resultKeys := make([]string, 0)
-
-	if ctx.Err() != nil {
-		return nil, nil, ctx.Err()
-	}
-	queuedChunks := make(chan chunk.Chunk)
-	go func() {
-		for _, c := range chunks {
-			queuedChunks <- c
-		}
-		close(queuedChunks)
-	}()
-	processedChunks := make(chan *chunkWithKey)
-	errors := make(chan error)
-	for i := 0; i < min(c.maxParallelPipelineChunk, len(chunks)); i++ {
-		go func() {
-			for cnk := range queuedChunks {
-				cnkWithKey, err := c.pipelineExecChunk(ctx, cnk, postFilterLogSelector, s)
-				if err != nil {
-					errors <- err
-				} else {
-					processedChunks <- cnkWithKey
-				}
-			}
-		}()
-	}
-	var lastErr error
-	for i := 0; i < len(chunks); i++ {
-		select {
-		case chunkWithKey := <-processedChunks:
-			result = append(result, chunkWithKey.cnk)
-			resultKeys = append(resultKeys, chunkWithKey.key)
-			if chunkWithKey.isPostFilter {
-				postFilterChunkLen++
-			}
-		case err := <-errors:
-			lastErr = err
-		}
-	}
-	return result, resultKeys, lastErr
-}
-
-func removeLineFmt(selector syntax.LogSelectorExpr) {
-	selector.Walk(func(e interface{}) {
-		pipelineExpr, ok := e.(*syntax.PipelineExpr)
-		if !ok {
-			return
-		}
-		stages := pipelineExpr.MultiStages
-		temp := pipelineExpr.MultiStages[:0]
-		for i, stageExpr := range stages {
-			_, ok := stageExpr.(*syntax.LineFmtExpr)
-			if !ok {
-				temp = append(temp, stageExpr)
-				continue
-			}
-			var found bool
-			for j := i; j < len(pipelineExpr.MultiStages); j++ {
-				if _, ok := pipelineExpr.MultiStages[j].(*syntax.LabelParserExpr); ok {
-					found = true
-					break
-				}
-				if _, ok := pipelineExpr.MultiStages[j].(*syntax.LineFilterExpr); ok {
-					found = true
-					break
-				}
-			}
-			if found {
-				temp = append(temp, stageExpr)
-			}
-		}
-		pipelineExpr.MultiStages = temp
-	})
-}
-
-func (c *chunkFiltererByExpr) pipelineExecChunk(ctx context.Context, cnk chunk.Chunk, logSelector syntax.LogSelectorExpr, s config.SchemaConfig) (*chunkWithKey, error) {
-	pipeline, err := logSelector.Pipeline()
-	if err != nil {
-		return nil, err
-	}
-	blocks := 0
-	postLen := 0
-	log, ctx := spanlogger.New(ctx, "chunkFiltererByExpr.pipelineExecChunk")
-	defer func() {
-		log.Span.LogFields(otlog.Int("blocks", blocks))
-		log.Span.LogFields(otlog.Int("postFilterChunkLen", postLen))
-		log.Span.Finish()
-	}()
-	streamPipeline := pipeline.ForStream(cnk.Metric.WithoutLabels(labels.MetricName))
-	chunkData := cnk.Data
-	lazyChunk := LazyChunk{Chunk: cnk}
-	newCtr, statCtx := stats.NewContext(ctx)
-	iterator, err := lazyChunk.Iterator(statCtx, c.from, c.through, c.direction, streamPipeline, c.nextChunk)
-	if err != nil {
-		return nil, err
-	}
-	lokiChunk := chunkData.(*chunkenc.Facade).LokiChunk()
-	postFilterChunkData := chunkenc.NewMemChunk(lokiChunk.Encoding(), chunkenc.UnorderedHeadBlockFmt, cnk.Data.Size(), cnk.Data.Size(), cnk.Data.Size(), time.Minute)
-	headChunkBytes := int64(0)
-	headChunkLine := int64(0)
-	decompressedLines := int64(0)
-	for iterator.Next() {
-		entry := iterator.Entry()
-		//reset line after post filter.
-		entry.Line = iterator.ProcessLine()
-		err := postFilterChunkData.Append(&entry)
-		if err != nil {
-			return nil, err
-		}
-		headChunkBytes += int64(len(entry.Line))
-		headChunkLine += int64(1)
-		decompressedLines += int64(1)
-
-	}
-	if err := postFilterChunkData.Close(); err != nil {
-		return nil, err
-	}
-	firstTime, lastTime := util.RoundToMilliseconds(postFilterChunkData.Bounds())
-	postFilterCh := chunk.NewChunk(
-		cnk.UserID, cnk.FingerprintModel(), cnk.Metric,
-		chunkenc.NewFacade(postFilterChunkData, 0, 0, 0, time.Minute),
-		firstTime,
-		lastTime,
-	)
-	chunkSize := postFilterChunkData.BytesSize() + 4*1024 // size + 4kB should be enough room for cortex header
-	if err := postFilterCh.EncodeTo(bytes.NewBuffer(make([]byte, 0, chunkSize))); err != nil {
-		return nil, err
-	}
-
-	decompressedBytes := int64(0)
-	compressedBytes := int64(0)
-	isPostFilter := false
-	postLen = postFilterChunkData.Size()
-	if postFilterChunkData.Size() != 0 {
-		isPostFilter = true
-		decompressedBytes = int64(postFilterChunkData.BytesSize())
-		encodedBytes, err := postFilterCh.Encoded()
-		if err != nil {
-			return nil, err
-		}
-		compressedBytes = int64(len(encodedBytes))
-	}
-	chunkStats := newCtr.Ingester().Store.Chunk
-	statContext := stats.FromContext(ctx)
-	statContext.AddHeadChunkLines(chunkStats.GetHeadChunkLines() - headChunkLine)
-	statContext.AddDecompressedLines(chunkStats.GetDecompressedLines() - decompressedLines)
-	statContext.AddHeadChunkBytes(chunkStats.GetHeadChunkBytes() - headChunkBytes)
-	statContext.AddDecompressedBytes(chunkStats.GetDecompressedBytes() - decompressedBytes)
-	statContext.AddCompressedBytes(chunkStats.GetCompressedBytes() - compressedBytes)
-
-	return &chunkWithKey{cnk: postFilterCh, key: s.ExternalKey(cnk.ChunkRef), isPostFilter: isPostFilter}, nil
-}
-
-type chunkWithKey struct {
-	cnk          chunk.Chunk
-	key          string
-	isPostFilter bool
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func shouldUseBoltDBIndexGatewayClient(cfg Config) bool {
-	if cfg.BoltDBShipperConfig.Mode != shipper.ModeReadOnly || cfg.BoltDBShipperConfig.IndexGatewayClientConfig.Disabled {
+func shouldUseIndexGatewayClient(cfg indexshipper.Config) bool {
+	if cfg.Mode != indexshipper.ModeReadOnly || cfg.IndexGatewayClientConfig.Disabled {
 		return false
 	}
 
-	gatewayCfg := cfg.BoltDBShipperConfig.IndexGatewayClientConfig
+	gatewayCfg := cfg.IndexGatewayClientConfig
 	if gatewayCfg.Mode == indexgateway.SimpleMode && gatewayCfg.Address == "" {
 		return false
 	}
@@ -459,37 +208,64 @@ func shouldUseBoltDBIndexGatewayClient(cfg Config) bool {
 	return true
 }
 
-func (s *store) storeForPeriod(p config.PeriodConfig, chunkClient client.Client, f *fetcher.Fetcher) (stores.ChunkWriter, series.IndexStore, func(), error) {
+func (s *store) storeForPeriod(p config.PeriodConfig, chunkClient client.Client, f *fetcher.Fetcher) (stores.ChunkWriter, index.ReaderWriter, func(), error) {
 	indexClientReg := prometheus.WrapRegistererWith(
-		prometheus.Labels{"component": "index-store-" + p.From.String()}, s.registerer)
+		prometheus.Labels{
+			"component": fmt.Sprintf(
+				"index-store-%s-%s",
+				p.IndexType,
+				p.From.String(),
+			),
+		}, s.registerer)
 
 	if p.IndexType == config.TSDBType {
+		if shouldUseIndexGatewayClient(s.cfg.TSDBShipperConfig) {
+			// inject the index-gateway client into the index store
+			gw, err := gatewayclient.NewGatewayClient(s.cfg.TSDBShipperConfig.IndexGatewayClientConfig, indexClientReg, s.logger)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			idx := series.NewIndexGatewayClientStore(gw, nil)
+
+			return failingChunkWriter{}, index.NewMonitoredReaderWriter(idx, indexClientReg), func() {
+				f.Stop()
+				gw.Stop()
+			}, nil
+		}
+
 		objectClient, err := NewObjectClient(s.cfg.TSDBShipperConfig.SharedStoreType, s.cfg, s.clientMetrics)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 
-		// ToDo(Sandeep): Avoid initializing writer when in read only mode
-		writer, idx, err := tsdb.NewStore(s.cfg.TSDBShipperConfig, p, f, objectClient, s.limits, indexClientReg)
+		var backupIndexWriter index.Writer
+		backupStoreStop := func() {}
+		if s.cfg.TSDBShipperConfig.UseBoltDBShipperAsBackup {
+			pCopy := p
+			pCopy.IndexType = config.BoltDBShipperType
+			pCopy.IndexTables.Prefix = fmt.Sprintf("%sbackup_", pCopy.IndexTables.Prefix)
+			_, backupIndexWriter, backupStoreStop, err = s.storeForPeriod(pCopy, chunkClient, f)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+		}
+
+		indexReaderWriter, stopTSDBStoreFunc, err := tsdb.NewStore(s.cfg.TSDBShipperConfig, p, f, objectClient, s.limits,
+			getIndexStoreTableRanges(config.TSDBType, s.schemaCfg.Configs), backupIndexWriter, indexClientReg)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 
-		// ToDo(Sandeep): Refactor code to not use boltdb-shipper index gateway client config
-		if shouldUseBoltDBIndexGatewayClient(s.cfg) {
-			// inject the index-gateway client into the index store
-			gw, err := shipper.NewGatewayClient(s.cfg.BoltDBShipperConfig.IndexGatewayClientConfig, indexClientReg, s.logger)
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			idx = series.NewIndexGatewayClientStore(gw, idx)
-		}
+		indexReaderWriter = index.NewMonitoredReaderWriter(indexReaderWriter, indexClientReg)
+		chunkWriter := stores.NewChunkWriter(f, s.schemaCfg, indexReaderWriter, s.storeCfg.DisableIndexDeduplication)
 
-		return writer, idx,
+		return chunkWriter, indexReaderWriter,
 			func() {
 				f.Stop()
 				chunkClient.Stop()
+				stopTSDBStoreFunc()
 				objectClient.Stop()
+				backupStoreStop()
 			}, nil
 	}
 
@@ -497,32 +273,31 @@ func (s *store) storeForPeriod(p config.PeriodConfig, chunkClient client.Client,
 	if err != nil {
 		return nil, nil, nil, errors.Wrap(err, "error creating index client")
 	}
-	idx = index.NewCachingIndexClient(idx, s.indexReadCache, s.cfg.IndexCacheValidity, s.limits, s.logger, s.cfg.DisableBroadIndexQueries)
-	schema, err := index.CreateSchema(p)
+	idx = series_index.NewCachingIndexClient(idx, s.indexReadCache, s.cfg.IndexCacheValidity, s.limits, s.logger, s.cfg.DisableBroadIndexQueries)
+	schema, err := series_index.CreateSchema(p)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	if s.storeCfg.CacheLookupsOlderThan != 0 {
-		schema = index.NewSchemaCaching(schema, time.Duration(s.storeCfg.CacheLookupsOlderThan))
+		schema = series_index.NewSchemaCaching(schema, time.Duration(s.storeCfg.CacheLookupsOlderThan))
 	}
 
-	var (
-		writer     stores.ChunkWriter = series.NewWriter(f, s.schemaCfg, idx, schema, s.writeDedupeCache, s.storeCfg.DisableIndexDeduplication)
-		indexStore                    = series.NewIndexStore(s.schemaCfg, schema, idx, f, s.cfg.MaxChunkBatchSize)
-	)
+	indexReaderWriter := series.NewIndexReaderWriter(s.schemaCfg, schema, idx, f, s.cfg.MaxChunkBatchSize, s.writeDedupeCache)
+	indexReaderWriter = index.NewMonitoredReaderWriter(indexReaderWriter, indexClientReg)
+	chunkWriter := stores.NewChunkWriter(f, s.schemaCfg, indexReaderWriter, s.storeCfg.DisableIndexDeduplication)
 
 	// (Sandeep): Disable IndexGatewayClientStore for stores other than tsdb until we are ready to enable it again
-	/*if shouldUseBoltDBIndexGatewayClient(s.cfg) {
+	/*if s.cfg.BoltDBShipperConfig != nil && shouldUseIndexGatewayClient(s.cfg.BoltDBShipperConfig) {
 		// inject the index-gateway client into the index store
 		gw, err := shipper.NewGatewayClient(s.cfg.BoltDBShipperConfig.IndexGatewayClientConfig, indexClientReg, s.logger)
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		indexStore = series.NewIndexGatewayClientStore(gw, indexStore)
+		indexReaderWriter = series.NewIndexGatewayClientStore(gw, indexReaderWriter)
 	}*/
 
-	return writer,
-		indexStore,
+	return chunkWriter,
+		indexReaderWriter,
 		func() {
 			chunkClient.Stop()
 			f.Stop()
@@ -586,6 +361,10 @@ func (s *store) SetChunkFilterer(chunkFilterer chunk.RequestChunkFilterer) {
 
 func (s *store) SetPostFetcherChunkFilterer(requestPostFetcherChunkFilterer RequestPostFetcherChunkFilterer) {
 	s.requestPostFetcherChunkFilterer = requestPostFetcherChunkFilterer
+}
+
+func (s *store) SetPostFetcherChunkMetricsFilterer(requestPostFetcherChunkMetricsFilterer RequestPostFetcherChunkFilterer) {
+	s.requestPostFetcherChunkMetricsFilterer = requestPostFetcherChunkMetricsFilterer
 }
 
 // lazyChunks is an internal function used to resolve a set of lazy chunks from the store without actually loading them. It's used internally by `LazyQuery` and `GetSeries`
@@ -745,8 +524,8 @@ func (s *store) SelectSamples(ctx context.Context, req logql.SelectSampleParams)
 	}
 
 	var postFetcherChunkFilterer PostFetcherChunkFilterer
-	if s.requestPostFetcherChunkFilterer != nil {
-		postFetcherChunkFilterer = s.requestPostFetcherChunkFilterer.ForSampleRequest(req.SampleQueryRequest)
+	if s.requestPostFetcherChunkMetricsFilterer != nil {
+		postFetcherChunkFilterer = s.requestPostFetcherChunkMetricsFilterer.ForSampleRequest(req.SampleQueryRequest)
 	}
 
 	return newSampleBatchIterator(ctx, s.schemaCfg, s.chunkMetrics, lazyChunks, s.cfg.MaxChunkBatchSize, matchers, extractor, req.Start, req.End, chunkFilterer, postFetcherChunkFilterer)
@@ -765,4 +544,32 @@ func filterChunksByTime(from, through model.Time, chunks []chunk.Chunk) []chunk.
 		filtered = append(filtered, chunk)
 	}
 	return filtered
+}
+
+type failingChunkWriter struct{}
+
+func (f failingChunkWriter) Put(_ context.Context, _ []chunk.Chunk) error {
+	return errWritingChunkUnsupported
+}
+
+func (f failingChunkWriter) PutOne(_ context.Context, _, _ model.Time, _ chunk.Chunk) error {
+	return errWritingChunkUnsupported
+}
+
+func getIndexStoreTableRanges(indexType string, periodicConfigs []config.PeriodConfig) config.TableRanges {
+	var ranges config.TableRanges
+	for i := range periodicConfigs {
+		if periodicConfigs[i].IndexType != indexType {
+			continue
+		}
+
+		periodEndTime := config.DayTime{Time: math.MaxInt64}
+		if i < len(periodicConfigs)-1 {
+			periodEndTime = config.DayTime{Time: periodicConfigs[i+1].From.Time.Add(-time.Millisecond)}
+		}
+
+		ranges = append(ranges, periodicConfigs[i].GetIndexTableNumberRange(periodEndTime))
+	}
+
+	return ranges
 }

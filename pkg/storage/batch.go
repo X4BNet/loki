@@ -426,7 +426,7 @@ func (it *logBatchIterator) buildIterators(chks map[model.Fingerprint][][]*LazyC
 	result := make([]iter.EntryIterator, 0, len(chks))
 	for _, chunks := range chks {
 		if len(chunks) != 0 && len(chunks[0]) != 0 {
-			streamPipeline := it.pipeline.ForStream(chunks[0][0].Chunk.Metric.WithoutLabels(labels.MetricName))
+			streamPipeline := it.pipeline.ForStream(labels.NewBuilder(chunks[0][0].Chunk.Metric).Del(labels.MetricName).Labels())
 			iterator, err := it.buildHeapIterator(chunks, from, through, streamPipeline, nextChunk)
 			if err != nil {
 				return nil, err
@@ -571,7 +571,7 @@ func (it *sampleBatchIterator) buildIterators(chks map[model.Fingerprint][][]*La
 	result := make([]iter.SampleIterator, 0, len(chks))
 	for _, chunks := range chks {
 		if len(chunks) != 0 && len(chunks[0]) != 0 {
-			streamExtractor := it.extractor.ForStream(chunks[0][0].Chunk.Metric.WithoutLabels(labels.MetricName))
+			streamExtractor := it.extractor.ForStream(labels.NewBuilder(chunks[0][0].Chunk.Metric).Del(labels.MetricName).Labels())
 			iterator, err := it.buildHeapIterator(chunks, from, through, streamExtractor, nextChunk)
 			if err != nil {
 				return nil, err
@@ -758,6 +758,9 @@ func fetchLazyChunks(ctx context.Context, s config.SchemaConfig, chunks []*LazyC
 			}
 			if postFetcherChunkFilterer != nil && len(chunkKeys) > 0 {
 				for i, chk := range chks {
+					if chk.UserID == "-1" {
+						continue
+					}
 					key := chunkKeys[i]
 					index[key].Chunk = chk
 				}
@@ -766,6 +769,9 @@ func fetchLazyChunks(ctx context.Context, s config.SchemaConfig, chunks []*LazyC
 			}
 			// assign fetched chunk by key as FetchChunks doesn't guarantee the order.
 			for _, chk := range chks {
+				if chk.UserID == "-1" {
+					continue
+				}
 				index[s.ExternalKey(chk.ChunkRef)].Chunk = chk
 			}
 

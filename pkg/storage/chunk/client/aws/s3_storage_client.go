@@ -50,7 +50,7 @@ var s3RequestDuration = instrument.NewHistogramCollector(prometheus.NewHistogram
 	Namespace: "loki",
 	Name:      "s3_request_duration_seconds",
 	Help:      "Time spent doing S3 requests.",
-	Buckets:   []float64{.025, .05, .1, .25, .5, 1, 2},
+	Buckets:   []float64{.025, .05, .1, .25, .5, 1, 2, 5, 10, 20, 30, 40, 50},
 }, []string{"operation", "status_code"}))
 
 // InjectRequestMiddleware gives users of this client the ability to make arbitrary
@@ -381,7 +381,7 @@ func (a *S3ObjectClient) GetObject(ctx context.Context, objectKey string) (io.Re
 		if resp.ContentLength != nil {
 			size = *resp.ContentLength
 		}
-		if err == nil {
+		if err == nil && resp.Body != nil {
 			return resp.Body, size, nil
 		}
 		retries.Wait()

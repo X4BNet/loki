@@ -2,8 +2,9 @@ package manifests
 
 import (
 	"github.com/ViaQ/logerr/v2/kverrors"
-	lokiv1beta1 "github.com/grafana/loki/operator/api/v1beta1"
-	"github.com/grafana/loki/operator/internal/manifests/internal/gateway"
+
+	configv1 "github.com/grafana/loki/operator/apis/config/v1"
+	lokiv1 "github.com/grafana/loki/operator/apis/loki/v1"
 	"github.com/grafana/loki/operator/internal/manifests/openshift"
 	"github.com/imdario/mergo"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
@@ -15,7 +16,8 @@ import (
 )
 
 // ApplyGatewayDefaultOptions applies defaults on the LokiStackSpec depending on selected
-// tenant mode. Currently nothing is applied for modes static and dynamic. For mode openshift-logging
+// tenant mode. Currently nothing is applied for modes static and dynamic.
+// For modes openshift-logging and openshift-network
 // the tenant spec is filled with defaults for authentication and authorization.
 func ApplyGatewayDefaultOptions(opts *Options) error {
 	if opts.Stack.Tenants == nil {
@@ -23,11 +25,19 @@ func ApplyGatewayDefaultOptions(opts *Options) error {
 	}
 
 	switch opts.Stack.Tenants.Mode {
-	case lokiv1beta1.Static, lokiv1beta1.Dynamic:
+	case lokiv1.Static, lokiv1.Dynamic:
 		return nil // continue using user input
 
-	case lokiv1beta1.OpenshiftLogging:
+	case lokiv1.OpenshiftLogging, lokiv1.OpenshiftNetwork:
+		tenantData := make(map[string]openshift.TenantData)
+		for name, tenant := range opts.Tenants.Configs {
+			tenantData[name] = openshift.TenantData{
+				CookieSecret: tenant.OpenShift.CookieSecret,
+			}
+		}
+
 		defaults := openshift.NewOptions(
+			opts.Stack.Tenants.Mode,
 			opts.Name,
 			opts.Namespace,
 			GatewayName(opts.Name),
@@ -35,13 +45,11 @@ func ApplyGatewayDefaultOptions(opts *Options) error {
 			serviceNameGatewayHTTP(opts.Name),
 			gatewayHTTPPortName,
 			ComponentLabels(LabelGatewayComponent, opts.Name),
-			opts.Flags.EnableServiceMonitors,
-			opts.Flags.EnableCertificateSigningService,
-			opts.TenantConfigMap,
+			tenantData,
 		)
 
 		if err := mergo.Merge(&opts.OpenShiftOptions, &defaults, mergo.WithOverride); err != nil {
-			return kverrors.Wrap(err, "failed to merge defaults for mode openshift logging")
+			return kverrors.Wrap(err, "failed to merge defaults for mode openshift")
 		}
 
 	}
@@ -49,45 +57,72 @@ func ApplyGatewayDefaultOptions(opts *Options) error {
 	return nil
 }
 
-func configureDeploymentForMode(d *appsv1.Deployment, mode lokiv1beta1.ModeType, flags FeatureFlags) error {
+func configureGatewayDeploymentForMode(
+	d *appsv1.Deployment, mode lokiv1.ModeType,
+	fg configv1.FeatureGates, stackName, stackNs string,
+	minTLSVersion string, ciphers string,
+) error {
 	switch mode {
-	case lokiv1beta1.Static, lokiv1beta1.Dynamic:
+	case lokiv1.Static, lokiv1.Dynamic:
 		return nil // nothing to configure
-	case lokiv1beta1.OpenshiftLogging:
+	case lokiv1.OpenshiftLogging, lokiv1.OpenshiftNetwork:
+		caBundleName := signingCABundleName(stackName)
+		serviceName := serviceNameGatewayHTTP(stackName)
+		secretName := signingServiceSecretName(serviceName)
+		serverName := fqdn(serviceName, stackNs)
 		return openshift.ConfigureGatewayDeployment(
 			d,
+			mode,
 			gatewayContainerName,
-			tlsMetricsSercetVolume,
-			gateway.LokiGatewayTLSDir,
-			gateway.LokiGatewayCertFile,
-			gateway.LokiGatewayKeyFile,
-			gateway.LokiGatewayCABundleDir,
-			gateway.LokiGatewayCAFile,
-			flags.EnableTLSServiceMonitorConfig,
-			flags.EnableCertificateSigningService,
+			tlsSecretVolume,
+			httpTLSDir,
+			tlsCertFile,
+			tlsKeyFile,
+			caBundleName,
+			caBundleDir,
+			caFile,
+			fg.HTTPEncryption,
+			fg.OpenShift.ServingCertsService,
+			secretName,
+			serverName,
+			gatewayHTTPPort,
+			minTLSVersion,
+			ciphers,
 		)
 	}
 
 	return nil
 }
 
-func configureServiceForMode(s *corev1.ServiceSpec, mode lokiv1beta1.ModeType) error {
+func configureGatewayServiceForMode(s *corev1.ServiceSpec, mode lokiv1.ModeType) error {
 	switch mode {
-	case lokiv1beta1.Static, lokiv1beta1.Dynamic:
+	case lokiv1.Static, lokiv1.Dynamic:
 		return nil // nothing to configure
-	case lokiv1beta1.OpenshiftLogging:
+	case lokiv1.OpenshiftLogging, lokiv1.OpenshiftNetwork:
 		return openshift.ConfigureGatewayService(s)
 	}
 
 	return nil
 }
 
+func configureLokiStackObjsForMode(objs []client.Object, opts Options) []client.Object {
+	switch opts.Stack.Tenants.Mode {
+	case lokiv1.Static, lokiv1.Dynamic:
+		// nothing to configure
+	case lokiv1.OpenshiftLogging, lokiv1.OpenshiftNetwork:
+		openShiftObjs := openshift.BuildLokiStackObjects(opts.OpenShiftOptions)
+		objs = append(objs, openShiftObjs...)
+	}
+
+	return objs
+}
+
 func configureGatewayObjsForMode(objs []client.Object, opts Options) []client.Object {
 	switch opts.Stack.Tenants.Mode {
-	case lokiv1beta1.Static, lokiv1beta1.Dynamic:
+	case lokiv1.Static, lokiv1.Dynamic:
 		// nothing to configure
-	case lokiv1beta1.OpenshiftLogging:
-		openShiftObjs := openshift.Build(opts.OpenShiftOptions)
+	case lokiv1.OpenshiftLogging, lokiv1.OpenshiftNetwork:
+		openShiftObjs := openshift.BuildGatewayObjects(opts.OpenShiftOptions)
 
 		var cObjs []client.Object
 		for _, o := range objs {
@@ -108,12 +143,12 @@ func configureGatewayObjsForMode(objs []client.Object, opts Options) []client.Ob
 	return objs
 }
 
-func configureServiceMonitorForMode(sm *monitoringv1.ServiceMonitor, mode lokiv1beta1.ModeType, flags FeatureFlags) error {
+func configureGatewayServiceMonitorForMode(sm *monitoringv1.ServiceMonitor, mode lokiv1.ModeType, fg configv1.FeatureGates) error {
 	switch mode {
-	case lokiv1beta1.Static, lokiv1beta1.Dynamic:
+	case lokiv1.Static, lokiv1.Dynamic:
 		return nil // nothing to configure
-	case lokiv1beta1.OpenshiftLogging:
-		return openshift.ConfigureGatewayServiceMonitor(sm, flags.EnableTLSServiceMonitorConfig)
+	case lokiv1.OpenshiftLogging, lokiv1.OpenshiftNetwork:
+		return openshift.ConfigureGatewayServiceMonitor(sm, fg.ServiceMonitorTLSEndpoints)
 	}
 
 	return nil

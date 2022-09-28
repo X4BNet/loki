@@ -14,6 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
+	"github.com/grafana/loki/pkg/logqlmodel"
 	"github.com/grafana/loki/pkg/storage/chunk/cache"
 	util_log "github.com/grafana/loki/pkg/util/log"
 )
@@ -56,6 +57,11 @@ type CardinalityExceededError struct {
 func (e CardinalityExceededError) Error() string {
 	return fmt.Sprintf("cardinality limit exceeded for %s{%s}; %d entries, more than limit of %d",
 		e.MetricName, e.LabelName, e.Size, e.Limit)
+}
+
+// Is allows to use errors.Is(err,ErrLimit) on this error.
+func (e CardinalityExceededError) Is(target error) bool {
+	return target == logqlmodel.ErrLimit
 }
 
 // StoreLimits helps get Limits specific to Queries for Stores
@@ -127,9 +133,11 @@ func (s *cachingIndexClient) queryPages(ctx context.Context, queries []Query, ca
 		keys = append(keys, key)
 		queriesByKey[key] = append(queriesByKey[key], query)
 	}
+	logger := util_log.WithContext(ctx, s.logger)
 
 	batches, misses := s.cacheFetch(ctx, keys)
 	for _, batch := range batches {
+		level.Warn(logger).Log("msg", "debug cachingIndexClient queryPages batch info", "Key", batch.Key, "Cardinality", len(batch.Entries), "cardinalityLimit", cardinalityLimit)
 		if cardinalityLimit > 0 && batch.Cardinality > cardinalityLimit {
 			return CardinalityExceededError{
 				Size:  batch.Cardinality,
@@ -196,6 +204,7 @@ func (s *cachingIndexClient) queryPages(ctx context.Context, queries []Query, ca
 		var cardinalityErr error
 		for key, batch := range results {
 			cardinality := int32(len(batch.Entries))
+			level.Warn(logger).Log("msg", "debug IndexClient queryPages batch info", "Key", key, "cardinality", cardinality, "cardinalityLimit", cardinalityLimit)
 			if cardinalityLimit > 0 && cardinality > cardinalityLimit {
 				batch.Cardinality = cardinality
 				batch.Entries = nil

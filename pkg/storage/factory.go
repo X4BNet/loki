@@ -25,9 +25,10 @@ import (
 	"github.com/grafana/loki/pkg/storage/chunk/client/testutils"
 	"github.com/grafana/loki/pkg/storage/config"
 	"github.com/grafana/loki/pkg/storage/stores/indexshipper"
+	"github.com/grafana/loki/pkg/storage/stores/indexshipper/downloads"
+	"github.com/grafana/loki/pkg/storage/stores/indexshipper/gatewayclient"
 	"github.com/grafana/loki/pkg/storage/stores/series/index"
 	"github.com/grafana/loki/pkg/storage/stores/shipper"
-	"github.com/grafana/loki/pkg/storage/stores/shipper/downloads"
 	util_log "github.com/grafana/loki/pkg/util/log"
 )
 
@@ -35,6 +36,16 @@ import (
 // This could also be done in NewBoltDBIndexClientWithShipper factory method but we are doing it here because that method is used
 // in tests for creating multiple instances of it at a time.
 var boltDBIndexClientWithShipper index.Client
+
+// ResetBoltDBIndexClientWithShipper allows to reset the singleton.
+// MUST ONLY BE USED IN TESTS
+func ResetBoltDBIndexClientWithShipper() {
+	if boltDBIndexClientWithShipper == nil {
+		return
+	}
+	boltDBIndexClientWithShipper.Stop()
+	boltDBIndexClientWithShipper = nil
+}
 
 // StoreLimits helps get Limits specific to Queries for Stores
 type StoreLimits interface {
@@ -46,17 +57,18 @@ type StoreLimits interface {
 
 // Config chooses which storage client to use.
 type Config struct {
-	AWSStorageConfig       aws.StorageConfig         `yaml:"aws"`
-	AzureStorageConfig     azure.BlobStorageConfig   `yaml:"azure"`
-	BOSStorageConfig       baidubce.BOSStorageConfig `yaml:"bos"`
-	GCPStorageConfig       gcp.Config                `yaml:"bigtable"`
-	GCSConfig              gcp.GCSConfig             `yaml:"gcs"`
-	CassandraStorageConfig cassandra.Config          `yaml:"cassandra"`
-	BoltDBConfig           local.BoltDBConfig        `yaml:"boltdb"`
-	FSConfig               local.FSConfig            `yaml:"filesystem"`
-	Swift                  openstack.SwiftConfig     `yaml:"swift"`
-	GrpcConfig             grpc.Config               `yaml:"grpc_store"`
-	Hedging                hedging.Config            `yaml:"hedging"`
+	AWSStorageConfig        aws.StorageConfig         `yaml:"aws"`
+	AzureStorageConfig      azure.BlobStorageConfig   `yaml:"azure"`
+	BOSStorageConfig        baidubce.BOSStorageConfig `yaml:"bos"`
+	GCPStorageConfig        gcp.Config                `yaml:"bigtable"`
+	GCSConfig               gcp.GCSConfig             `yaml:"gcs"`
+	CassandraStorageConfig  cassandra.Config          `yaml:"cassandra"`
+	Cassandra2StorageConfig cassandra.Config          `yaml:"cassandra2"`
+	BoltDBConfig            local.BoltDBConfig        `yaml:"boltdb"`
+	FSConfig                local.FSConfig            `yaml:"filesystem"`
+	Swift                   openstack.SwiftConfig     `yaml:"swift"`
+	GrpcConfig              grpc.Config               `yaml:"grpc_store"`
+	Hedging                 hedging.Config            `yaml:"hedging"`
 
 	IndexCacheValidity time.Duration `yaml:"index_cache_validity"`
 
@@ -81,7 +93,10 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 	cfg.BOSStorageConfig.RegisterFlags(f)
 	cfg.GCPStorageConfig.RegisterFlags(f)
 	cfg.GCSConfig.RegisterFlags(f)
+	cfg.CassandraStorageConfig.Name = "cassandra-"
 	cfg.CassandraStorageConfig.RegisterFlags(f)
+	cfg.Cassandra2StorageConfig.Name = "Cassandra2-"
+	cfg.Cassandra2StorageConfig.RegisterFlags(f)
 	cfg.BoltDBConfig.RegisterFlags(f)
 	cfg.FSConfig.RegisterFlags(f)
 	cfg.Swift.RegisterFlags(f)
@@ -102,6 +117,9 @@ func (cfg *Config) Validate() error {
 	if err := cfg.CassandraStorageConfig.Validate(); err != nil {
 		return errors.Wrap(err, "invalid Cassandra Storage config")
 	}
+	if err := cfg.Cassandra2StorageConfig.Validate(); err != nil {
+		return errors.Wrap(err, "invalid Cassandra2 Storage config")
+	}
 	if err := cfg.GCPStorageConfig.Validate(util_log.Logger); err != nil {
 		return errors.Wrap(err, "invalid GCP Storage Storage config")
 	}
@@ -119,6 +137,9 @@ func (cfg *Config) Validate() error {
 	}
 	if err := cfg.BoltDBShipperConfig.Validate(); err != nil {
 		return errors.Wrap(err, "invalid boltdb-shipper config")
+	}
+	if err := cfg.TSDBShipperConfig.Validate(); err != nil {
+		return errors.Wrap(err, "invalid tsdb config")
 	}
 	return nil
 }
@@ -147,6 +168,8 @@ func NewIndexClient(name string, cfg Config, schemaCfg config.SchemaConfig, limi
 		return gcp.NewStorageClientColumnKey(context.Background(), cfg.GCPStorageConfig, schemaCfg)
 	case config.StorageTypeCassandra:
 		return cassandra.NewStorageClient(cfg.CassandraStorageConfig, schemaCfg, registerer)
+	case config.StorageTypeCassandra2:
+		return cassandra.NewStorageClient(cfg.Cassandra2StorageConfig, schemaCfg, registerer)
 	case config.StorageTypeBoltDB:
 		return local.NewBoltDBIndexClient(cfg.BoltDBConfig)
 	case config.StorageTypeGrpc:
@@ -156,8 +179,8 @@ func NewIndexClient(name string, cfg Config, schemaCfg config.SchemaConfig, limi
 			return boltDBIndexClientWithShipper, nil
 		}
 
-		if shouldUseBoltDBIndexGatewayClient(cfg) {
-			gateway, err := shipper.NewGatewayClient(cfg.BoltDBShipperConfig.IndexGatewayClientConfig, registerer, util_log.Logger)
+		if shouldUseIndexGatewayClient(cfg.BoltDBShipperConfig.Config) {
+			gateway, err := gatewayclient.NewGatewayClient(cfg.BoltDBShipperConfig.IndexGatewayClientConfig, registerer, util_log.Logger)
 			if err != nil {
 				return nil, err
 			}
@@ -171,7 +194,10 @@ func NewIndexClient(name string, cfg Config, schemaCfg config.SchemaConfig, limi
 			return nil, err
 		}
 
-		boltDBIndexClientWithShipper, err = shipper.NewShipper(cfg.BoltDBShipperConfig, objectClient, limits, ownsTenantFn, registerer)
+		tableRanges := getIndexStoreTableRanges(config.BoltDBShipperType, schemaCfg.Configs)
+
+		boltDBIndexClientWithShipper, err = shipper.NewShipper(cfg.BoltDBShipperConfig, objectClient, limits,
+			ownsTenantFn, tableRanges, registerer)
 
 		return boltDBIndexClientWithShipper, err
 	default:
@@ -229,6 +255,8 @@ func NewChunkClient(name string, cfg Config, schemaCfg config.SchemaConfig, clie
 		return client.NewClientWithMaxParallel(c, nil, cfg.MaxParallelGetChunk, schemaCfg), nil
 	case config.StorageTypeCassandra:
 		return cassandra.NewObjectClient(cfg.CassandraStorageConfig, schemaCfg, registerer, cfg.MaxParallelGetChunk)
+	case config.StorageTypeCassandra2:
+		return cassandra.NewObjectClient(cfg.Cassandra2StorageConfig, schemaCfg, registerer, cfg.MaxParallelGetChunk)
 	case config.StorageTypeFileSystem:
 		store, err := local.NewFSObjectClient(cfg.FSConfig)
 		if err != nil {
@@ -260,16 +288,22 @@ func NewTableClient(name string, cfg Config, cm ClientMetrics, registerer promet
 		return gcp.NewTableClient(context.Background(), cfg.GCPStorageConfig)
 	case config.StorageTypeCassandra:
 		return cassandra.NewTableClient(context.Background(), cfg.CassandraStorageConfig, registerer)
+	case config.StorageTypeCassandra2:
+		return cassandra.NewTableClient(context.Background(), cfg.Cassandra2StorageConfig, registerer)
 	case config.StorageTypeBoltDB:
 		return local.NewTableClient(cfg.BoltDBConfig.Directory)
 	case config.StorageTypeGrpc:
 		return grpc.NewTableClient(cfg.GrpcConfig)
-	case config.BoltDBShipperType:
+	case config.BoltDBShipperType, config.TSDBType:
 		objectClient, err := NewObjectClient(cfg.BoltDBShipperConfig.SharedStoreType, cfg, cm)
 		if err != nil {
 			return nil, err
 		}
-		return shipper.NewBoltDBShipperTableClient(objectClient, cfg.BoltDBShipperConfig.SharedStoreKeyPrefix), nil
+		sharedStoreKeyPrefix := cfg.BoltDBShipperConfig.SharedStoreKeyPrefix
+		if name == config.TSDBType {
+			sharedStoreKeyPrefix = cfg.TSDBShipperConfig.SharedStoreKeyPrefix
+		}
+		return indexshipper.NewTableClient(objectClient, sharedStoreKeyPrefix), nil
 	default:
 		return nil, fmt.Errorf("Unrecognized storage client %v, choose one of: %v, %v, %v, %v, %v, %v, %v", name, config.StorageTypeAWS, config.StorageTypeCassandra, config.StorageTypeInMemory, config.StorageTypeGCP, config.StorageTypeBigTable, config.StorageTypeBigTableHashed, config.StorageTypeGrpc)
 	}

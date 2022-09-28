@@ -42,11 +42,19 @@ within a Kubernetes cluster.
         helm upgrade --install loki --namespace=loki grafana/loki-simple-scalable
         ```
 
-    - Deploy with added custom configuration:
+    - Deploy with added custom configuration using an overrides YAML file, useful for overriding a set of values:
+
+        ```bash
+        helm upgrade --install loki grafana/loki-simple-scalable --values {PATH_TO_OVERRIDES_VALUES_FILE}
+        ```
+
+    - Deploy with added custom configuration, useful for overriding a small quantity of values:
 
         ```bash
         helm upgrade --install loki grafana/loki-simple-scalable --set "key1=val1,key2=val2,..."
         ```
+
+Find deployment examples at [https://github.com/grafana/helm-charts/tree/main/charts/loki-simple-scalable/docs/examples](https://github.com/grafana/helm-charts/tree/main/charts/loki-simple-scalable/docs/examples).
 
 ## Deploy Grafana to your Kubernetes cluster
 
@@ -70,7 +78,7 @@ kubectl port-forward --namespace <YOUR-NAMESPACE> service/loki-grafana 3000:80
 
 Navigate to `http://localhost:3000` and login with `admin` and the password
 output above. Then follow the [instructions for adding the Loki Data Source](../../getting-started/grafana/), using the URL
-`http://<helm-installation-name>-gateway.<namespace>.svc.cluster.local:3100/` for Loki, with `<helm-installation-name>` and `<namespaced>` replaced with the correct values for your deployment.
+`http://<helm-installation-name>-gateway.<namespace>.svc.cluster.local/` for Loki, with `<helm-installation-name>` and `<namespaced>` replaced with the correct values for your deployment.
 
 ## Run Loki behind HTTPS Ingress
 
@@ -111,6 +119,10 @@ spec:
     hosts:
     - {{ .Values.ingress.host }}
 ```
+
+## Run Promtail within Kubernetes as a Daemonset
+
+In order to run Promtail within Kubernetes to gather logs from each node, start with the [Promtail installation](../../clients/promtail/installation/#daemonset-recommended) documentation example.
 
 ## Run Promtail with syslog support
 

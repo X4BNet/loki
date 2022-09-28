@@ -50,6 +50,17 @@ func (d *Distributor) PushHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, err = d.Push(r.Context(), req)
+	if d.logSender != nil {
+		sendErr := d.logSender.Send(r.Context(), tenantID, req, r.Header)
+		if sendErr != nil {
+			level.Warn(logger).Log(
+				"msg", "logSender send log fail",
+				"err", "sendErr",
+			)
+			http.Error(w, sendErr.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
 	if err == nil {
 		if d.tenantConfigs.LogPushRequest(tenantID) {
 			level.Debug(logger).Log(
@@ -59,7 +70,11 @@ func (d *Distributor) PushHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-
+	level.Error(logger).Log(
+		"msg", "debug push request failed",
+		"code", http.StatusInternalServerError,
+		"err", err.Error(),
+	)
 	resp, ok := httpgrpc.HTTPResponseFromError(err)
 	if ok {
 		body := string(resp.Body)
@@ -89,7 +104,7 @@ func (d *Distributor) PushHandler(w http.ResponseWriter, r *http.Request) {
 // the distributor and as such, no ring status is returned from this function.
 func (d *Distributor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if d.rateLimitStrat == validation.GlobalIngestionRateStrategy {
-		d.distributorsRing.ServeHTTP(w, r)
+		d.distributorsLifecycler.ServeHTTP(w, r)
 		return
 	}
 

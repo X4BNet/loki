@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/model/labels"
 
 	"github.com/grafana/loki/pkg/storage/chunk"
 	"github.com/grafana/loki/pkg/storage/chunk/client/util"
@@ -153,6 +155,11 @@ func (o *client) GetChunks(ctx context.Context, chunks []chunk.Chunk) ([]chunk.C
 	return util.GetParallelChunks(ctx, getChunkMaxParallel, chunks, o.getChunk)
 }
 
+var EmptyLabel = labels.Labels{
+	{Name: model.MetricNameLabel, Value: "foo"},
+	{Name: "bar", Value: "baz"},
+}
+
 func (o *client) getChunk(ctx context.Context, decodeContext *chunk.DecodeContext, c chunk.Chunk) (chunk.Chunk, error) {
 	if ctx.Err() != nil {
 		return chunk.Chunk{}, ctx.Err()
@@ -165,9 +172,27 @@ func (o *client) getChunk(ctx context.Context, decodeContext *chunk.DecodeContex
 
 	readCloser, size, err := o.store.GetObject(ctx, key)
 	if err != nil {
+		if strings.Contains(err.Error(), "NoSuchKey") {
+			const chunkLen = 13 * 3600 // in seconds
+			userID := "-1"
+			ts := model.TimeFromUnix(int64(0 * chunkLen))
+			promChunk := chunk.New()
+			emptyChunk := chunk.NewChunk(
+				userID,
+				model.Fingerprint(1),
+				EmptyLabel,
+				promChunk,
+				ts,
+				ts.Add(chunkLen))
+			return emptyChunk, nil
+		}
+
 		return chunk.Chunk{}, errors.WithStack(err)
 	}
 
+	if readCloser == nil {
+		return chunk.Chunk{}, errors.New("object client getChunk fail because object is nil")
+	}
 	defer readCloser.Close()
 
 	// adds bytes.MinRead to avoid allocations when the size is known.

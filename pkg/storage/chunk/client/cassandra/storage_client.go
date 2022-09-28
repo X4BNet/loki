@@ -8,14 +8,16 @@ import (
 	"fmt"
 	"io/ioutil"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/gocql/gocql"
 	"github.com/grafana/dskit/flagext"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/model/labels"
 	"golang.org/x/sync/semaphore"
 
 	"github.com/grafana/loki/pkg/storage/chunk"
@@ -27,6 +29,7 @@ import (
 
 // Config for a StorageClient
 type Config struct {
+	Name                     string
 	Addresses                string              `yaml:"addresses"`
 	Port                     int                 `yaml:"port"`
 	Keyspace                 string              `yaml:"keyspace"`
@@ -61,35 +64,36 @@ const (
 	HostPolicyTokenAware = "token-aware"
 )
 
-// RegisterFlags adds the flags required to config this to the given FlagSet
+// RegisterFlags adds the flags required to config this to the given FlagSet,
 func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
-	f.StringVar(&cfg.Addresses, "cassandra.addresses", "", "Comma-separated hostnames or IPs of Cassandra instances.")
-	f.IntVar(&cfg.Port, "cassandra.port", 9042, "Port that Cassandra is running on")
-	f.StringVar(&cfg.Keyspace, "cassandra.keyspace", "", "Keyspace to use in Cassandra.")
-	f.StringVar(&cfg.Consistency, "cassandra.consistency", "QUORUM", "Consistency level for Cassandra.")
-	f.IntVar(&cfg.ReplicationFactor, "cassandra.replication-factor", 3, "Replication factor to use in Cassandra.")
-	f.BoolVar(&cfg.DisableInitialHostLookup, "cassandra.disable-initial-host-lookup", false, "Instruct the cassandra driver to not attempt to get host info from the system.peers table.")
-	f.BoolVar(&cfg.SSL, "cassandra.ssl", false, "Use SSL when connecting to cassandra instances.")
-	f.BoolVar(&cfg.HostVerification, "cassandra.host-verification", true, "Require SSL certificate validation.")
-	f.StringVar(&cfg.HostSelectionPolicy, "cassandra.host-selection-policy", HostPolicyRoundRobin, "Policy for selecting Cassandra host. Supported values are: round-robin, token-aware.")
-	f.StringVar(&cfg.CAPath, "cassandra.ca-path", "", "Path to certificate file to verify the peer.")
-	f.StringVar(&cfg.CertPath, "cassandra.tls-cert-path", "", "Path to certificate file used by TLS.")
-	f.StringVar(&cfg.KeyPath, "cassandra.tls-key-path", "", "Path to private key file used by TLS.")
-	f.BoolVar(&cfg.Auth, "cassandra.auth", false, "Enable password authentication when connecting to cassandra.")
-	f.StringVar(&cfg.Username, "cassandra.username", "", "Username to use when connecting to cassandra.")
-	f.Var(&cfg.Password, "cassandra.password", "Password to use when connecting to cassandra.")
-	f.StringVar(&cfg.PasswordFile, "cassandra.password-file", "", "File containing password to use when connecting to cassandra.")
-	f.Var(&cfg.CustomAuthenticators, "cassandra.custom-authenticator", "If set, when authenticating with cassandra a custom authenticator will be expected during the handshake. This flag can be set multiple times.")
-	f.DurationVar(&cfg.Timeout, "cassandra.timeout", 2*time.Second, "Timeout when connecting to cassandra.")
-	f.DurationVar(&cfg.ConnectTimeout, "cassandra.connect-timeout", 5*time.Second, "Initial connection timeout, used during initial dial to server.")
-	f.DurationVar(&cfg.ReconnectInterval, "cassandra.reconnent-interval", 1*time.Second, "Interval to retry connecting to cassandra nodes marked as DOWN.")
-	f.IntVar(&cfg.Retries, "cassandra.max-retries", 0, "Number of retries to perform on a request. Set to 0 to disable retries.")
-	f.DurationVar(&cfg.MinBackoff, "cassandra.retry-min-backoff", 100*time.Millisecond, "Minimum time to wait before retrying a failed request.")
-	f.DurationVar(&cfg.MaxBackoff, "cassandra.retry-max-backoff", 10*time.Second, "Maximum time to wait before retrying a failed request.")
-	f.IntVar(&cfg.QueryConcurrency, "cassandra.query-concurrency", 0, "Limit number of concurrent queries to Cassandra. Set to 0 to disable the limit.")
-	f.IntVar(&cfg.NumConnections, "cassandra.num-connections", 2, "Number of TCP connections per host.")
-	f.BoolVar(&cfg.ConvictHosts, "cassandra.convict-hosts-on-failure", true, "Convict hosts of being down on failure.")
-	f.StringVar(&cfg.TableOptions, "cassandra.table-options", "", "Table options used to create index or chunk tables. This value is used as plain text in the table `WITH` like this, \"CREATE TABLE <generated_by_cortex> (...) WITH <cassandra.table-options>\". For details, see https://cortexmetrics.io/docs/production/cassandra. By default it will use the default table options of your Cassandra cluster.")
+	name := cfg.Name
+	f.StringVar(&cfg.Addresses, name+"cassandra.addresses", "", "Comma-separated hostnames or IPs of Cassandra instances.")
+	f.IntVar(&cfg.Port, name+"cassandra.port", 9042, "Port that Cassandra is running on")
+	f.StringVar(&cfg.Keyspace, name+"cassandra.keyspace", "", "Keyspace to use in Cassandra.")
+	f.StringVar(&cfg.Consistency, name+"cassandra.consistency", "QUORUM", "Consistency level for Cassandra.")
+	f.IntVar(&cfg.ReplicationFactor, name+"cassandra.replication-factor", 3, "Replication factor to use in Cassandra.")
+	f.BoolVar(&cfg.DisableInitialHostLookup, name+"cassandra.disable-initial-host-lookup", false, "Instruct the cassandra driver to not attempt to get host info from the system.peers table.")
+	f.BoolVar(&cfg.SSL, name+"cassandra.ssl", false, "Use SSL when connecting to cassandra instances.")
+	f.BoolVar(&cfg.HostVerification, name+"cassandra.host-verification", true, "Require SSL certificate validation.")
+	f.StringVar(&cfg.HostSelectionPolicy, name+"cassandra.host-selection-policy", HostPolicyRoundRobin, "Policy for selecting Cassandra host. Supported values are: round-robin, token-aware.")
+	f.StringVar(&cfg.CAPath, name+"cassandra.ca-path", "", "Path to certificate file to verify the peer.")
+	f.StringVar(&cfg.CertPath, name+"cassandra.tls-cert-path", "", "Path to certificate file used by TLS.")
+	f.StringVar(&cfg.KeyPath, name+"cassandra.tls-key-path", "", "Path to private key file used by TLS.")
+	f.BoolVar(&cfg.Auth, name+"cassandra.auth", false, "Enable password authentication when connecting to cassandra.")
+	f.StringVar(&cfg.Username, name+"cassandra.username", "", "Username to use when connecting to cassandra.")
+	f.Var(&cfg.Password, name+"cassandra.password", "Password to use when connecting to cassandra.")
+	f.StringVar(&cfg.PasswordFile, name+"cassandra.password-file", "", "File containing password to use when connecting to cassandra.")
+	f.Var(&cfg.CustomAuthenticators, name+"cassandra.custom-authenticator", "If set, when authenticating with cassandra a custom authenticator will be expected during the handshake. This flag can be set multiple times.")
+	f.DurationVar(&cfg.Timeout, name+"cassandra.timeout", 2*time.Second, "Timeout when connecting to cassandra.")
+	f.DurationVar(&cfg.ConnectTimeout, name+"cassandra.connect-timeout", 5*time.Second, "Initial connection timeout, used during initial dial to server.")
+	f.DurationVar(&cfg.ReconnectInterval, name+"cassandra.reconnent-interval", 1*time.Second, "Interval to retry connecting to cassandra nodes marked as DOWN.")
+	f.IntVar(&cfg.Retries, name+"cassandra.max-retries", 0, "Number of retries to perform on a request. Set to 0 to disable retries.")
+	f.DurationVar(&cfg.MinBackoff, name+"cassandra.retry-min-backoff", 100*time.Millisecond, "Minimum time to wait before retrying a failed request.")
+	f.DurationVar(&cfg.MaxBackoff, name+"cassandra.retry-max-backoff", 10*time.Second, "Maximum time to wait before retrying a failed request.")
+	f.IntVar(&cfg.QueryConcurrency, name+"cassandra.query-concurrency", 0, "Limit number of concurrent queries to Cassandra. Set to 0 to disable the limit.")
+	f.IntVar(&cfg.NumConnections, name+"cassandra.num-connections", 2, "Number of TCP connections per host.")
+	f.BoolVar(&cfg.ConvictHosts, name+"cassandra.convict-hosts-on-failure", true, "Convict hosts of being down on failure.")
+	f.StringVar(&cfg.TableOptions, name+"cassandra.table-options", "", "Table options used to create index or chunk tables. This value is used as plain text in the table `WITH` like this, \"CREATE TABLE <generated_by_cortex> (...) WITH <cassandra.table-options>\". For details, see https://cortexmetrics.io/docs/production/cassandra. By default it will use the default table options of your Cassandra cluster.")
 }
 
 // nolint: revive
@@ -109,19 +113,20 @@ func (cfg *Config) Validate() error {
 	return nil
 }
 
-func (cfg *Config) session(name string, reg prometheus.Registerer) (*gocql.Session, error) {
+func (cfg *Config) session(name string, reg prometheus.Registerer) (*gocql.Session, *gocql.ClusterConfig, error) {
+	level.Warn(util_log.Logger).Log("msg", "Cassandra create session", "name", name, "reg", reg)
 	cluster := gocql.NewCluster(strings.Split(cfg.Addresses, ",")...)
 	cluster.Port = cfg.Port
 	cluster.Keyspace = cfg.Keyspace
-	cluster.BatchObserver = observer{}
-	cluster.QueryObserver = observer{}
+	cluster.BatchObserver = &observer{name: cfg.Name}
+	cluster.QueryObserver = &observer{name: cfg.Name}
 	cluster.Timeout = cfg.Timeout
 	cluster.ConnectTimeout = cfg.ConnectTimeout
 	cluster.ReconnectInterval = cfg.ReconnectInterval
 	cluster.NumConns = cfg.NumConnections
-	cluster.Logger = log.With(util_log.Logger, "module", "gocql", "client", name)
-	cluster.Registerer = prometheus.WrapRegistererWith(
-		prometheus.Labels{"client": name}, reg)
+	//cluster.Logger = log.With(util_log.Logger, "module", "gocql", "client", name)
+	//cluster.Registerer = prometheus.WrapRegistererWith(
+	//	prometheus.Labels{"client": cfg.Name + name}, reg)
 	if cfg.Retries > 0 {
 		cluster.RetryPolicy = &gocql.ExponentialBackoffRetryPolicy{
 			NumRetries: cfg.Retries,
@@ -133,24 +138,24 @@ func (cfg *Config) session(name string, reg prometheus.Registerer) (*gocql.Sessi
 		cluster.ConvictionPolicy = noopConvictionPolicy{}
 	}
 	if err := cfg.setClusterConfig(cluster); err != nil {
-		return nil, errors.WithStack(err)
+		return nil, nil, errors.WithStack(err)
 	}
 
 	session, err := cluster.CreateSession()
 	if err == nil {
-		return session, nil
+		return session, cluster, nil
 	}
 	// ErrNoConnectionsStarted will be returned if keyspace don't exist or is invalid.
 	// ref. https://github.com/gocql/gocql/blob/07ace3bab0f84bb88477bab5d79ba1f7e1da0169/cassandra_test.go#L85-L97
 	if err != gocql.ErrNoConnectionsStarted {
-		return nil, errors.WithStack(err)
+		return nil, nil, errors.WithStack(err)
 	}
 	// keyspace not exist
 	if err := cfg.createKeyspace(); err != nil {
-		return nil, errors.WithStack(err)
+		return nil, nil, errors.WithStack(err)
 	}
 	session, err = cluster.CreateSession()
-	return session, errors.WithStack(err)
+	return session, cluster, errors.WithStack(err)
 }
 
 // apply config settings to a cassandra ClusterConfig
@@ -255,21 +260,25 @@ func (cfg *Config) createKeyspace() error {
 
 // StorageClient implements chunk.IndexClient and chunk.ObjectClient for Cassandra.
 type StorageClient struct {
-	cfg            Config
-	schemaCfg      config.SchemaConfig
-	readSession    *gocql.Session
-	writeSession   *gocql.Session
-	querySemaphore *semaphore.Weighted
+	cfg                Config
+	schemaCfg          config.SchemaConfig
+	readSession        *gocql.Session
+	writeSession       *gocql.Session
+	writeMtx           sync.Mutex
+	readMtx            sync.Mutex
+	readClusterConfig  *gocql.ClusterConfig
+	writeClusterConfig *gocql.ClusterConfig
+	querySemaphore     *semaphore.Weighted
 }
 
 // NewStorageClient returns a new StorageClient.
 func NewStorageClient(cfg Config, schemaCfg config.SchemaConfig, registerer prometheus.Registerer) (*StorageClient, error) {
-	readSession, err := cfg.session("index-read", registerer)
+	readSession, readClusterConfig, err := cfg.session("index-read", registerer)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 
-	writeSession, err := cfg.session("index-write", registerer)
+	writeSession, writeClusterConfig, err := cfg.session("index-write", registerer)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -280,11 +289,13 @@ func NewStorageClient(cfg Config, schemaCfg config.SchemaConfig, registerer prom
 	}
 
 	client := &StorageClient{
-		cfg:            cfg,
-		schemaCfg:      schemaCfg,
-		readSession:    readSession,
-		writeSession:   writeSession,
-		querySemaphore: querySemaphore,
+		cfg:                cfg,
+		schemaCfg:          schemaCfg,
+		readSession:        readSession,
+		writeSession:       writeSession,
+		readClusterConfig:  readClusterConfig,
+		writeClusterConfig: writeClusterConfig,
+		querySemaphore:     querySemaphore,
 	}
 	return client, nil
 }
@@ -326,6 +337,56 @@ func (b *writeBatch) Delete(tableName, hashValue string, rangeValue []byte) {
 
 // BatchWrite implement chunk.IndexClient.
 func (s *StorageClient) BatchWrite(ctx context.Context, batch index.WriteBatch) error {
+	err := s.batchWrite(ctx, batch)
+	if err != nil {
+		fmt.Println(time.Now(), " - cassandra BatchWrite fail,err:", err, ",errors.Cause(err):", errors.Cause(err))
+	}
+	//
+	if errors.Cause(err) == gocql.ErrNoConnections {
+		fmt.Println(time.Now(), " - cassandra BatchWrite fail,do reconnect,err:", err, ",errors.Cause(err):", errors.Cause(err))
+		connectErr := s.reconnectWriteSession()
+		if connectErr != nil {
+			fmt.Println(time.Now(), " - cassandra PutChunks fail,do reconnect fail,connectErr:", connectErr)
+			return errors.Wrap(err, "BatchWrite BatchWrite reconnect fail")
+		}
+		fmt.Println(time.Now(), " - cassandra BatchWrite fail,do reconnect success,connectErr:", connectErr)
+		// retry after reconnect
+		err = s.batchWrite(ctx, batch)
+		if err != nil {
+			fmt.Println(time.Now(), " - cassandra BatchWrite retry fail ,do reconnect success,err:", err)
+			return err
+		}
+		fmt.Println(time.Now(), " - cassandra BatchWrite retry success ,do reconnect success,err:", err)
+
+	}
+	return err
+}
+
+func (s *StorageClient) reconnectWriteSession() error {
+	s.writeMtx.Lock()
+	defer s.writeMtx.Unlock()
+	newSession, err := s.writeClusterConfig.CreateSession()
+	if err != nil {
+		return err
+	}
+	s.writeSession.Close()
+	s.writeSession = newSession
+	return nil
+}
+
+func (s *StorageClient) reconnectReadSession() error {
+	s.readMtx.Lock()
+	defer s.readMtx.Unlock()
+	newSession, err := s.readClusterConfig.CreateSession()
+	if err != nil {
+		return err
+	}
+	s.readSession.Close()
+	s.readSession = newSession
+	return nil
+}
+
+func (s *StorageClient) batchWrite(ctx context.Context, batch index.WriteBatch) error {
 	b := batch.(*writeBatch)
 
 	for _, entry := range b.entries {
@@ -349,10 +410,31 @@ func (s *StorageClient) BatchWrite(ctx context.Context, batch index.WriteBatch) 
 
 // QueryPages implement chunk.IndexClient.
 func (s *StorageClient) QueryPages(ctx context.Context, queries []index.Query, callback index.QueryPagesCallback) error {
-	return util.DoParallelQueries(ctx, s.query, queries, callback)
+	err := util.DoParallelQueries(ctx, s.query, queries, callback)
+	if err != nil {
+		return errors.New("StorageClient QueryPages fail,err:" + err.Error())
+	}
+	return nil
 }
 
 func (s *StorageClient) query(ctx context.Context, query index.Query, callback index.QueryPagesCallback) error {
+	err := s.queryExec(ctx, query, callback)
+	//
+	if errors.Cause(err) == gocql.ErrNotFound {
+		return nil
+	}
+	if errors.Cause(err) == gocql.ErrNoConnections {
+		connectErr := s.reconnectReadSession()
+		if connectErr != nil {
+			return errors.Wrap(err, "StorageClient query reconnect fail")
+		}
+		// retry after reconnect
+		err = s.queryExec(ctx, query, callback)
+	}
+	return errors.Wrap(err, "query index fail")
+}
+
+func (s *StorageClient) queryExec(ctx context.Context, query index.Query, callback index.QueryPagesCallback) error {
 	if s.querySemaphore != nil {
 		if err := s.querySemaphore.Acquire(ctx, 1); err != nil {
 			return err
@@ -443,22 +525,26 @@ func (b *readBatchIter) Value() []byte {
 
 // ObjectClient implements chunk.ObjectClient for Cassandra.
 type ObjectClient struct {
-	cfg            Config
-	schemaCfg      config.SchemaConfig
-	readSession    *gocql.Session
-	writeSession   *gocql.Session
-	querySemaphore *semaphore.Weighted
-	maxGetParallel int
+	cfg                Config
+	schemaCfg          config.SchemaConfig
+	readSession        *gocql.Session
+	writeSession       *gocql.Session
+	writeMtx           sync.Mutex
+	readMtx            sync.Mutex
+	readClusterConfig  *gocql.ClusterConfig
+	writeClusterConfig *gocql.ClusterConfig
+	querySemaphore     *semaphore.Weighted
+	maxGetParallel     int
 }
 
 // NewObjectClient returns a new ObjectClient.
 func NewObjectClient(cfg Config, schemaCfg config.SchemaConfig, registerer prometheus.Registerer, maxGetParallel int) (*ObjectClient, error) {
-	readSession, err := cfg.session("chunks-read", registerer)
+	readSession, readClusterConfig, err := cfg.session("chunks-read", registerer)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 
-	writeSession, err := cfg.session("chunks-write", registerer)
+	writeSession, writeClusterConfig, err := cfg.session("chunks-write", registerer)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -469,18 +555,68 @@ func NewObjectClient(cfg Config, schemaCfg config.SchemaConfig, registerer prome
 	}
 
 	client := &ObjectClient{
-		cfg:            cfg,
-		schemaCfg:      schemaCfg,
-		readSession:    readSession,
-		writeSession:   writeSession,
-		querySemaphore: querySemaphore,
-		maxGetParallel: maxGetParallel,
+		cfg:                cfg,
+		schemaCfg:          schemaCfg,
+		readSession:        readSession,
+		writeSession:       writeSession,
+		readClusterConfig:  readClusterConfig,
+		writeClusterConfig: writeClusterConfig,
+		querySemaphore:     querySemaphore,
+		maxGetParallel:     maxGetParallel,
 	}
 	return client, nil
+}
+func (s *ObjectClient) reconnectWriteSession() error {
+	s.writeMtx.Lock()
+	defer s.writeMtx.Unlock()
+	newSession, err := s.writeClusterConfig.CreateSession()
+	if err != nil {
+		return err
+	}
+	s.writeSession.Close()
+	s.writeSession = newSession
+	return nil
+}
+
+func (s *ObjectClient) reconnectReadSession() error {
+	s.readMtx.Lock()
+	defer s.readMtx.Unlock()
+	newSession, err := s.readClusterConfig.CreateSession()
+	if err != nil {
+		return err
+	}
+	s.readSession.Close()
+	s.readSession = newSession
+	return nil
 }
 
 // PutChunks implements chunk.ObjectClient.
 func (s *ObjectClient) PutChunks(ctx context.Context, chunks []chunk.Chunk) error {
+	err := s.putChunks(ctx, chunks)
+	if err != nil {
+		fmt.Println(time.Now(), " - cassandra PutChunks fail,err:", err, ",errors.Cause(err):", errors.Cause(err))
+	}
+	//
+	if errors.Cause(err) == gocql.ErrNoConnections {
+		fmt.Println(time.Now(), " - cassandra PutChunks fail,do reconnect,err:", err, ",errors.Cause(err):", errors.Cause(err))
+		connectErr := s.reconnectWriteSession()
+		if connectErr != nil {
+			fmt.Println(time.Now(), " - cassandra PutChunks fail,do reconnect fail,connectErr:", connectErr)
+			return errors.Wrap(err, "ObjectClient BatchWrite reconnect fail")
+		}
+		fmt.Println(time.Now(), " - cassandra PutChunks fail,do reconnect success,connectErr:", connectErr)
+		// retry after reconnect
+		err = s.putChunks(ctx, chunks)
+		if err != nil {
+			fmt.Println(time.Now(), " - cassandra PutChunks retry fail ,do reconnect success,err:", err)
+			return err
+		}
+		fmt.Println(time.Now(), " - cassandra PutChunks retry success ,do reconnect success,err:", err)
+	}
+	return err
+}
+
+func (s *ObjectClient) putChunks(ctx context.Context, chunks []chunk.Chunk) error {
 	for i := range chunks {
 		buf, err := chunks[i].Encoded()
 		if err != nil {
@@ -505,10 +641,47 @@ func (s *ObjectClient) PutChunks(ctx context.Context, chunks []chunk.Chunk) erro
 
 // GetChunks implements chunk.ObjectClient.
 func (s *ObjectClient) GetChunks(ctx context.Context, input []chunk.Chunk) ([]chunk.Chunk, error) {
-	return util.GetParallelChunks(ctx, s.maxGetParallel, input, s.getChunk)
+	chunks, err := util.GetParallelChunks(ctx, s.maxGetParallel, input, s.getChunk)
+	if err != nil {
+		return nil, errors.New("util.GetParallelChunks fail," + err.Error())
+	}
+	return chunks, nil
+}
+
+var emptyLabel = labels.Labels{
+	{Name: model.MetricNameLabel, Value: "foo"},
+	{Name: "bar", Value: "baz"},
 }
 
 func (s *ObjectClient) getChunk(ctx context.Context, decodeContext *chunk.DecodeContext, input chunk.Chunk) (chunk.Chunk, error) {
+	result, err := s.getChunkExec(ctx, decodeContext, input)
+	if errors.Cause(err) == gocql.ErrNotFound {
+		const chunkLen = 13 * 3600 // in seconds
+		userID := "-1"
+		ts := model.TimeFromUnix(int64(0 * chunkLen))
+		promChunk := chunk.New()
+		emptyChunk := chunk.NewChunk(
+			userID,
+			model.Fingerprint(1),
+			emptyLabel,
+			promChunk,
+			ts,
+			ts.Add(chunkLen))
+		return emptyChunk, nil
+	}
+	//
+	if errors.Cause(err) == gocql.ErrNoConnections {
+		connectErr := s.reconnectReadSession()
+		if connectErr != nil {
+			return input, errors.Wrap(err, "ObjectClient getChunk reconnect fail")
+		}
+		// retry after reconnect
+		result, err = s.getChunkExec(ctx, decodeContext, input)
+	}
+	return result, errors.Wrap(err, "get chunk fail")
+}
+
+func (s *ObjectClient) getChunkExec(ctx context.Context, decodeContext *chunk.DecodeContext, input chunk.Chunk) (chunk.Chunk, error) {
 	if s.querySemaphore != nil {
 		if err := s.querySemaphore.Acquire(ctx, 1); err != nil {
 			return input, err

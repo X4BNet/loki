@@ -6,15 +6,16 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	lokiv1 "github.com/grafana/loki/operator/apis/loki/v1"
 	routev1 "github.com/openshift/api/route/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 )
 
 func TestBuild_ServiceAccountRefMatches(t *testing.T) {
-	opts := NewOptions("abc", "ns", "abc", "example.com", "abc", "abc", map[string]string{}, false, false, map[string]TenantData{})
+	opts := NewOptions(lokiv1.OpenshiftLogging, "abc", "ns", "abc", "example.com", "abc", "abc", map[string]string{}, map[string]TenantData{})
 
-	objs := Build(opts)
+	objs := BuildGatewayObjects(opts)
 	sa := objs[1].(*corev1.ServiceAccount)
 	rb := objs[3].(*rbacv1.ClusterRoleBinding)
 
@@ -24,9 +25,9 @@ func TestBuild_ServiceAccountRefMatches(t *testing.T) {
 }
 
 func TestBuild_ClusterRoleRefMatches(t *testing.T) {
-	opts := NewOptions("abc", "ns", "abc", "example.com", "abc", "abc", map[string]string{}, false, false, map[string]TenantData{})
+	opts := NewOptions(lokiv1.OpenshiftLogging, "abc", "ns", "abc", "example.com", "abc", "abc", map[string]string{}, map[string]TenantData{})
 
-	objs := Build(opts)
+	objs := BuildGatewayObjects(opts)
 	cr := objs[2].(*rbacv1.ClusterRole)
 	rb := objs[3].(*rbacv1.ClusterRoleBinding)
 
@@ -35,9 +36,9 @@ func TestBuild_ClusterRoleRefMatches(t *testing.T) {
 }
 
 func TestBuild_MonitoringClusterRoleRefMatches(t *testing.T) {
-	opts := NewOptions("abc", "ns", "abc", "example.com", "abc", "abc", map[string]string{}, true, false, map[string]TenantData{})
+	opts := NewOptions(lokiv1.OpenshiftLogging, "abc", "ns", "abc", "example.com", "abc", "abc", map[string]string{}, map[string]TenantData{})
 
-	objs := Build(opts)
+	objs := BuildGatewayObjects(opts)
 	cr := objs[4].(*rbacv1.Role)
 	rb := objs[5].(*rbacv1.RoleBinding)
 
@@ -46,9 +47,9 @@ func TestBuild_MonitoringClusterRoleRefMatches(t *testing.T) {
 }
 
 func TestBuild_ServiceAccountAnnotationsRouteRefMatches(t *testing.T) {
-	opts := NewOptions("abc", "ns", "abc", "example.com", "abc", "abc", map[string]string{}, false, false, map[string]TenantData{})
+	opts := NewOptions(lokiv1.OpenshiftLogging, "abc", "ns", "abc", "example.com", "abc", "abc", map[string]string{}, map[string]TenantData{})
 
-	objs := Build(opts)
+	objs := BuildGatewayObjects(opts)
 	rt := objs[0].(*routev1.Route)
 	sa := objs[1].(*corev1.ServiceAccount)
 

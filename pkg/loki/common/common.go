@@ -6,6 +6,7 @@ import (
 	"github.com/grafana/dskit/flagext"
 	"github.com/grafana/dskit/netutil"
 
+	"github.com/grafana/loki/pkg/storage/chunk/cache"
 	"github.com/grafana/loki/pkg/storage/chunk/client/aws"
 	"github.com/grafana/loki/pkg/storage/chunk/client/azure"
 	"github.com/grafana/loki/pkg/storage/chunk/client/baidubce"
@@ -40,9 +41,15 @@ type Config struct {
 	// You can check this during Loki execution under ring status pages (ex: `/ring` will output the address of the different ingester
 	// instances).
 	InstanceAddr string `yaml:"instance_addr"`
+
+	// CompactorAddress is the http address of the compactor in the form http://host:port
+	CompactorAddress string `yaml:"compactor_address"`
+
+	// Global embedded-cache config. Independent of what type of cache, we need some singleton configs like Ring configuration when running in distributed fashion.
+	EmbeddedCacheConfig cache.EmbeddedCacheSingletonConfig `yaml:"embedded_cache"`
 }
 
-func (c *Config) RegisterFlags(_ *flag.FlagSet) {
+func (c *Config) RegisterFlags(f *flag.FlagSet) {
 	throwaway := flag.NewFlagSet("throwaway", flag.PanicOnError)
 	throwaway.IntVar(&c.ReplicationFactor, "common.replication-factor", 3, "How many ingesters incoming data should be replicated to.")
 	c.Storage.RegisterFlagsWithPrefix("common.storage", throwaway)
@@ -52,6 +59,10 @@ func (c *Config) RegisterFlags(_ *flag.FlagSet) {
 	c.InstanceInterfaceNames = netutil.PrivateNetworkInterfacesWithFallback([]string{"eth0", "en0"}, util_log.Logger)
 	throwaway.StringVar(&c.InstanceAddr, "common.instance-addr", "", "Default advertised address to be used by Loki components.")
 	throwaway.Var((*flagext.StringSlice)(&c.InstanceInterfaceNames), "common.instance-interface-names", "List of network interfaces to read address from.")
+
+	f.StringVar(&c.CompactorAddress, "common.compactor-address", "", "the http address of the compactor in the form http://host:port")
+
+	c.EmbeddedCacheConfig.RegisterFlagsWithPrefix("common.embedded-cache", "", f)
 }
 
 type Storage struct {

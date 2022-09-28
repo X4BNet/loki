@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/prometheus/common/model"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/prometheus/common/model"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
@@ -108,8 +109,9 @@ func applyExtraLabels(labels model.LabelSet) model.LabelSet {
 func checkEventType(ev map[string]interface{}) (interface{}, error) {
 	var s3Event events.S3Event
 	var cwEvent events.CloudwatchLogsEvent
+	var kinesisEvent events.KinesisEvent
 
-	types := [...]interface{}{&s3Event, &cwEvent}
+	types := [...]interface{}{&s3Event, &cwEvent, &kinesisEvent}
 
 	j, _ := json.Marshal(ev)
 	reader := strings.NewReader(string(j))
@@ -136,11 +138,13 @@ func handler(ctx context.Context, ev map[string]interface{}) error {
 		return err
 	}
 
-	switch event.(type) {
+	switch evt := event.(type) {
 	case *events.S3Event:
-		return processS3Event(ctx, event.(*events.S3Event))
+		return processS3Event(ctx, evt)
 	case *events.CloudwatchLogsEvent:
-		return processCWEvent(ctx, event.(*events.CloudwatchLogsEvent))
+		return processCWEvent(ctx, evt)
+	case *events.KinesisEvent:
+		return processKinesisEvent(ctx, evt)
 	}
 
 	return err
