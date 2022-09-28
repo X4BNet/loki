@@ -133,7 +133,7 @@ func (s *cachingIndexClient) queryPages(ctx context.Context, queries []Query, ca
 		keys = append(keys, key)
 		queriesByKey[key] = append(queriesByKey[key], query)
 	}
-	logger := util_log.WithContext(ctx, s.logger)
+	//logger := util_log.WithContext(ctx, s.logger)
 
 	batches, misses := s.cacheFetch(ctx, keys)
 	for _, batch := range batches {
