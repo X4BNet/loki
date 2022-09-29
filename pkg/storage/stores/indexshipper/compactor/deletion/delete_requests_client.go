@@ -129,7 +129,7 @@ func (c *deleteRequestsClient) updateCache() {
 	for _, userID := range userIDs {
 		deleteReq, err := c.getRequestsFromServer(context.Background(), userID)
 		if err != nil {
-			level.Error(log.Logger).Log("msg", "error getting delete requests from the store", "err", err)
+			//level.Error(log.Logger).Log("msg", "error getting delete requests from the store", "err", err)
 			continue
 		}
 		newCache[userID] = deleteReq
@@ -155,7 +155,7 @@ func (c *deleteRequestsClient) currentUserIDs() []string {
 func (c *deleteRequestsClient) getRequestsFromServer(ctx context.Context, userID string) ([]DeleteRequest, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
 	if err != nil {
-		level.Error(log.Logger).Log("msg", "error getting delete requests from the store", "err", err)
+		//level.Error(log.Logger).Log("msg", "error getting delete requests from the store", "err", err)
 		return nil, err
 	}
 
@@ -163,7 +163,7 @@ func (c *deleteRequestsClient) getRequestsFromServer(ctx context.Context, userID
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		level.Error(log.Logger).Log("msg", "error getting delete requests from the store", "err", err)
+		//level.Error(log.Logger).Log("msg", "error getting delete requests from the store", "err", err)
 		return nil, err
 	}
 	defer func() {
@@ -173,7 +173,7 @@ func (c *deleteRequestsClient) getRequestsFromServer(ctx context.Context, userID
 
 	if resp.StatusCode/100 != 2 {
 		err := fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-		level.Error(log.Logger).Log("msg", "error getting delete requests from the store", "err", err)
+		//level.Error(log.Logger).Log("msg", "error getting delete requests from the store", "err", err)
 		return nil, err
 	}
 
