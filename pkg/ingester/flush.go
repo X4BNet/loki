@@ -355,9 +355,7 @@ func (i *Ingester) flushChunks(ctx context.Context, fp model.Fingerprint, labelP
 		level.Debug(util_log.Logger).Log("index", j, "msg", "flushing flushChunk", "userid", userID, "labels", labelPairs)
 		if err := i.flushChunk(ctx, &ch); err != nil {
 			// If the flush fails, we need to page out the blocks in the chunk.
-			for _, b := range c.chunk.blocks {
-				b.Pageout()
-			}
+			c.chunk.Pageout()
 
 			return err
 		}

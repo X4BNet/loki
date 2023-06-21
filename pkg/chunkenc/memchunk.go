@@ -943,6 +943,12 @@ func (c *MemChunk) SampleIterator(ctx context.Context, from, through time.Time, 
 	)
 }
 
+func (c *MemChunk) Pageout() {
+	for _, b := range c.blocks {
+		b.Pageout()
+	}
+}
+
 // Blocks implements Chunk
 func (c *MemChunk) Blocks(mintT, maxtT time.Time) []Block {
 	mint, maxt := mintT.UnixNano(), maxtT.UnixNano()
