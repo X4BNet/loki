@@ -170,9 +170,13 @@ func (i *Ingester) flushLoop(j int) {
 		err := i.flushUserSeries(op.userID, op.fp, op.immediate)
 		if err != nil {
 			level.Error(util_log.WithUserID(op.userID, util_log.Logger)).Log("msg", "failed to flush", "err", err)
-			if strings.HasPrefix(err.Error(), "SlowDown:") {
+
+			errstr := err.Error()
+
+			// 3s delay for throttling errors, or 50x errors.
+			if strings.HasPrefix(errstr, "SlowDown:") || strings.Contains(errstr, "status code: 50") {
 				runtime.GC()
-				time.Sleep(time.Second)
+				time.Sleep(time.Second * 3)
 			}
 		}
 		level.Debug(util_log.Logger).Log("index", j, "msg", "flush stream success", "userid", op.userID, "fp", op.fp, "immediate", op.immediate)
@@ -350,6 +354,9 @@ func (i *Ingester) flushChunks(ctx context.Context, fp model.Fingerprint, labelP
 
 		level.Debug(util_log.Logger).Log("index", j, "msg", "flushing flushChunk", "userid", userID, "labels", labelPairs)
 		if err := i.flushChunk(ctx, &ch); err != nil {
+			// If the flush fails, we need to page out the blocks in the chunk.
+			c.chunk.Pageout()
+
 			return err
 		}
 		level.Debug(util_log.Logger).Log("index", j, "msg", "flush Chunk", "userid", userID, "labels", labelPairs)
