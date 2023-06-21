@@ -298,6 +298,7 @@ func (r *markerProcessor) processPath(path string, deleteFunc func(ctx context.C
 			for key := range queue {
 				if err := processKey(r.ctx, key, dbUpdate, deleteFunc); err != nil {
 					level.Warn(util_log.Logger).Log("msg", "failed to delete key", "key", key.key.String(), "value", key.value.String(), "err", err)
+					time.Sleep(100 * time.Millisecond)
 				}
 				putKeyBuffer(key)
 			}
