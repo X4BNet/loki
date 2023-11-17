@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	strings "strings"
 	"time"
 
 	"github.com/go-kit/log"
@@ -297,6 +298,21 @@ func (s *Sweeper) Start() {
 			level.Debug(util_log.Logger).Log("msg", "delete on not found chunk", "chunkID", chunkIDString)
 			return nil
 		}
+
+		errstr := err.Error()
+
+		// 5s delay for throttling errors, or 50x errors.
+		if strings.HasPrefix(errstr, "SlowDown:") || strings.Contains(errstr, "status code: 50") {
+			time.Sleep(time.Second * 5)
+
+			err = s.chunkClient.DeleteChunk(ctx, unsafeGetString(userID), chunkIDString)
+			if s.chunkClient.IsChunkNotFoundErr(err) {
+				status = statusNotFound
+				level.Debug(util_log.Logger).Log("msg", "delete on not found chunk", "chunkID", chunkIDString)
+				return nil
+			}
+		}
+
 		if err != nil {
 			level.Error(util_log.Logger).Log("msg", "error deleting chunk", "chunkID", chunkIDString, "err", err)
 			status = statusFailure

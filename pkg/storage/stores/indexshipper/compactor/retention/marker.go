@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	strings "strings"
 	"sync"
 	"time"
 
@@ -297,8 +298,19 @@ func (r *markerProcessor) processPath(path string, deleteFunc func(ctx context.C
 			defer wg.Done()
 			for key := range queue {
 				if err := processKey(r.ctx, key, dbUpdate, deleteFunc); err != nil {
-					level.Warn(util_log.Logger).Log("msg", "failed to delete key", "key", key.key.String(), "value", key.value.String(), "err", err)
-					time.Sleep(100 * time.Millisecond)
+					errstr := err.Error()
+
+					// 5s delay for throttling errors, or 50x errors.
+					if strings.HasPrefix(errstr, "SlowDown:") || strings.Contains(errstr, "status code: 50") {
+						time.Sleep(time.Second * 5)
+
+						err = processKey(r.ctx, key, dbUpdate, deleteFunc)
+					}
+
+					if err != nil {
+						level.Warn(util_log.Logger).Log("msg", "failed to delete key", "key", key.key.String(), "value", key.value.String(), "err", err)
+						time.Sleep(100 * time.Millisecond)
+					}
 				}
 				putKeyBuffer(key)
 			}
