@@ -107,6 +107,9 @@ func (i *Ingester) sweepUsers(immediate, mayRemoveStreams bool) {
 
 func (i *Ingester) sweepInstance(instance *instance, immediate, mayRemoveStreams bool) {
 	_ = instance.streams.ForEach(func(s *stream) (bool, error) {
+		if !immediate {
+			time.Sleep(time.Second)
+		}
 		i.sweepStream(instance, s, immediate)
 		i.removeFlushedChunks(instance, s, mayRemoveStreams)
 		return true, nil
@@ -128,10 +131,16 @@ func (i *Ingester) sweepStream(instance *instance, stream *stream, immediate boo
 
 	flushQueueIndex := int(uint64(stream.fp) % uint64(i.cfg.ConcurrentFlushes))
 	firstTime, _ := stream.chunks[0].chunk.Bounds()
-	i.flushQueues[flushQueueIndex].Enqueue(&flushOp{
+
+	flushQueue := i.flushQueues[flushQueueIndex]
+	flushQueue.Enqueue(&flushOp{
 		model.TimeFromUnixNano(firstTime.UnixNano()), instance.instanceID,
 		stream.fp, immediate,
 	})
+
+	if flushQueue.Length() > 100 && !immediate {
+		time.Sleep(time.Second)
+	}
 }
 
 func (i *Ingester) flushLoop(j int) {
