@@ -193,7 +193,7 @@ func TestStreamIterator(t *testing.T) {
 		{"gzipChunk", func() *chunkenc.MemChunk {
 			chunkfmt, headfmt := defaultChunkFormat(t)
 
-			return chunkenc.NewMemChunk(chunkfmt, chunkenc.EncGZIP, headfmt, 256*1024, 0)
+			return chunkenc.NewMemChunk(chunkfmt, chunkenc.EncGZIP, headfmt, 256*1024, 0, 0, time.Minute)
 		}},
 	} {
 		t.Run(chk.name, func(t *testing.T) {
