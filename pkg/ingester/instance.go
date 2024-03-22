@@ -678,6 +678,10 @@ func (i *instance) GetStats(ctx context.Context, req *logproto.IndexStatsRequest
 					factor := util.GetFactorOfTime(from.UnixNano(), through.UnixNano(), chkFrom.UnixNano(), chkThrough.UnixNano())
 					res.Entries += uint64(factor * float64(chk.chunk.Size()))
 					res.Bytes += uint64(factor * float64(chk.chunk.UncompressedSize()))
+					ts := uint64(chkThrough.UnixNano())
+					if res.End < ts {
+						res.End = ts
+					}
 				}
 
 			}
