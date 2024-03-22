@@ -103,7 +103,7 @@ func fillStore(cm storage.ClientMetrics) error {
 			labelsBuilder.Set(labels.MetricName, "logs")
 			metric := labelsBuilder.Labels()
 			fp := client.Fingerprint(lbs)
-			chunkEnc := chunkenc.NewMemChunk(chunkfmt, chunkenc.EncLZ4_4M, headfmt, 262144, 1572864)
+			chunkEnc := chunkenc.NewMemChunk(chunkfmt, chunkenc.EncLZ4_4M, headfmt, 262144, 1572864, 1572864, time.Minute)
 			for ts := start.UnixNano(); ts < start.UnixNano()+time.Hour.Nanoseconds(); ts = ts + time.Millisecond.Nanoseconds() {
 				entry := &logproto.Entry{
 					Timestamp: time.Unix(0, ts),
@@ -113,7 +113,7 @@ func fillStore(cm storage.ClientMetrics) error {
 					_ = chunkEnc.Append(entry)
 				} else {
 					from, to := chunkEnc.Bounds()
-					c := chunk.NewChunk("fake", fp, metric, chunkenc.NewFacade(chunkEnc, 0, 0), model.TimeFromUnixNano(from.UnixNano()), model.TimeFromUnixNano(to.UnixNano()))
+					c := chunk.NewChunk("fake", fp, metric, chunkenc.NewFacade(chunkEnc, 0, 0, 0, time.Minute), model.TimeFromUnixNano(from.UnixNano()), model.TimeFromUnixNano(to.UnixNano()))
 					if err := c.Encode(); err != nil {
 						panic(err)
 					}
@@ -126,7 +126,7 @@ func fillStore(cm storage.ClientMetrics) error {
 					if flushCount >= maxChunks {
 						return
 					}
-					chunkEnc = chunkenc.NewMemChunk(chunkenc.ChunkFormatV4, chunkenc.EncLZ4_64k, chunkenc.UnorderedWithStructuredMetadataHeadBlockFmt, 262144, 1572864)
+					chunkEnc = chunkenc.NewMemChunk(chunkenc.ChunkFormatV4, chunkenc.EncLZ4_64k, chunkenc.UnorderedWithStructuredMetadataHeadBlockFmt, 262144, 1572864, 1572864, time.Minute)
 				}
 			}
 		}(i)

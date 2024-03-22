@@ -105,7 +105,7 @@ func (c *dumbChunk) Bytes() ([]byte, error) {
 	return nil, nil
 }
 
-func (c *dumbChunk) BytesWith(_ []byte) ([]byte, error) {
+func (c *dumbChunk) BytesWith(_ *block) ([]byte, error) {
 	return nil, nil
 }
 
