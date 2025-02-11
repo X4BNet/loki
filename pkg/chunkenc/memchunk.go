@@ -981,7 +981,7 @@ func (c *MemChunk) Cut() error {
 		return err
 	}
 
-	lenUpsize := int(math.Ceil(len(buffer)/4096.0) * 4096)
+	lenUpsize := int(math.Ceil(float32(len(buffer))/4096) * 4096)
 	buffer2, err := MmapAlloc(lenUpsize)
 	if err != nil {
 		return err
