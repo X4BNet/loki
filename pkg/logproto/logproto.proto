@@ -429,6 +429,7 @@ message IndexStatsResponse {
   uint64 chunks = 2 [(gogoproto.jsontag) = "chunks"];
   uint64 bytes = 3 [(gogoproto.jsontag) = "bytes"];
   uint64 entries = 4 [(gogoproto.jsontag) = "entries"];
+  uint64 end = 5 [(gogoproto.jsontag) = "end"];
 }
 
 message VolumeRequest {

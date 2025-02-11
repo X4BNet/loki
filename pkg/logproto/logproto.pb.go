@@ -2468,6 +2468,7 @@ type IndexStatsResponse struct {
 	Chunks  uint64 `protobuf:"varint,2,opt,name=chunks,proto3" json:"chunks"`
 	Bytes   uint64 `protobuf:"varint,3,opt,name=bytes,proto3" json:"bytes"`
 	Entries uint64 `protobuf:"varint,4,opt,name=entries,proto3" json:"entries"`
+	End     uint64 `protobuf:"varint,5,opt,name=end,proto3" json:"end"`
 }
 
 func (m *IndexStatsResponse) Reset()      { *m = IndexStatsResponse{} }
@@ -2526,6 +2527,13 @@ func (m *IndexStatsResponse) GetBytes() uint64 {
 func (m *IndexStatsResponse) GetEntries() uint64 {
 	if m != nil {
 		return m.Entries
+	}
+	return 0
+}
+
+func (m *IndexStatsResponse) GetEnd() uint64 {
+	if m != nil {
+		return m.End
 	}
 	return 0
 }
@@ -4894,6 +4902,9 @@ func (this *IndexStatsResponse) Equal(that interface{}) bool {
 	if this.Entries != that1.Entries {
 		return false
 	}
+	if this.End != that1.End {
+		return false
+	}
 	return true
 }
 func (this *VolumeRequest) Equal(that interface{}) bool {
@@ -5822,12 +5833,13 @@ func (this *IndexStatsResponse) GoString() string {
 	if this == nil {
 		return "nil"
 	}
-	s := make([]string, 0, 8)
+	s := make([]string, 0, 9)
 	s = append(s, "&logproto.IndexStatsResponse{")
 	s = append(s, "Streams: "+fmt.Sprintf("%#v", this.Streams)+",\n")
 	s = append(s, "Chunks: "+fmt.Sprintf("%#v", this.Chunks)+",\n")
 	s = append(s, "Bytes: "+fmt.Sprintf("%#v", this.Bytes)+",\n")
 	s = append(s, "Entries: "+fmt.Sprintf("%#v", this.Entries)+",\n")
+	s = append(s, "End: "+fmt.Sprintf("%#v", this.End)+",\n")
 	s = append(s, "}")
 	return strings.Join(s, "")
 }
@@ -8690,6 +8702,11 @@ func (m *IndexStatsResponse) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 	_ = i
 	var l int
 	_ = l
+	if m.End != 0 {
+		i = encodeVarintLogproto(dAtA, i, uint64(m.End))
+		i--
+		dAtA[i] = 0x28
+	}
 	if m.Entries != 0 {
 		i = encodeVarintLogproto(dAtA, i, uint64(m.Entries))
 		i--
@@ -10104,6 +10121,9 @@ func (m *IndexStatsResponse) Size() (n int) {
 	if m.Entries != 0 {
 		n += 1 + sovLogproto(uint64(m.Entries))
 	}
+	if m.End != 0 {
+		n += 1 + sovLogproto(uint64(m.End))
+	}
 	return n
 }
 
@@ -10944,6 +10964,7 @@ func (this *IndexStatsResponse) String() string {
 		`Chunks:` + fmt.Sprintf("%v", this.Chunks) + `,`,
 		`Bytes:` + fmt.Sprintf("%v", this.Bytes) + `,`,
 		`Entries:` + fmt.Sprintf("%v", this.Entries) + `,`,
+		`End:` + fmt.Sprintf("%v", this.End) + `,`,
 		`}`,
 	}, "")
 	return s
@@ -17245,6 +17266,25 @@ func (m *IndexStatsResponse) Unmarshal(dAtA []byte) error {
 				b := dAtA[iNdEx]
 				iNdEx++
 				m.Entries |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 5:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field End", wireType)
+			}
+			m.End = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowLogproto
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.End |= uint64(b&0x7F) << shift
 				if b < 0x80 {
 					break
 				}
