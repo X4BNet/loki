@@ -8,6 +8,7 @@ import (
 	"hash"
 	"hash/crc32"
 	"io"
+	"math"
 	"runtime"
 	"time"
 	"unsafe"
@@ -147,6 +148,7 @@ type MemChunk struct {
 type block struct {
 	// This is compressed bytes.
 	b          []byte
+	p          []byte
 	numEntries int
 
 	mint, maxt int64
@@ -860,6 +862,7 @@ func finalizeBlock(b *block) {
 		panic(err)
 	}
 	b.b = nil
+	b.p = nil
 }
 
 func (c *MemChunk) HeadSize() int {
@@ -978,7 +981,8 @@ func (c *MemChunk) Cut() error {
 		return err
 	}
 
-	buffer2, err := MmapAlloc(len(buffer))
+	lenUpsize := int(math.Ceil(len(buffer)/4096.0) * 4096)
+	buffer2, err := MmapAlloc(lenUpsize)
 	if err != nil {
 		return err
 	}
@@ -990,7 +994,8 @@ func (c *MemChunk) Cut() error {
 
 	mint, maxt := c.head.Bounds()
 	blk := &block{
-		b:                buffer2,
+		p:                buffer2,
+		b:                buffer2[:len(buffer)],
 		numEntries:       c.head.Entries(),
 		mint:             mint,
 		maxt:             maxt,
@@ -1281,7 +1286,7 @@ func (b block) MaxTime() int64 {
 }
 
 func (b block) Pageout() {
-	unix.Madvise(b.b, 21)
+	unix.Madvise(b.p, 21)
 }
 
 func (hb *headBlock) Iterator(ctx context.Context, direction logproto.Direction, mint, maxt int64, pipeline log.StreamPipeline) iter.EntryIterator {
