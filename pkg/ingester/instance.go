@@ -34,7 +34,6 @@ import (
 	"github.com/grafana/loki/v3/pkg/logql"
 	"github.com/grafana/loki/v3/pkg/logql/log"
 	"github.com/grafana/loki/v3/pkg/logql/syntax"
-	"github.com/grafana/loki/v3/pkg/logqlmodel/metadata"
 	"github.com/grafana/loki/v3/pkg/logqlmodel/stats"
 	"github.com/grafana/loki/v3/pkg/runtime"
 	"github.com/grafana/loki/v3/pkg/storage/chunk"
@@ -45,7 +44,6 @@ import (
 	"github.com/grafana/loki/v3/pkg/util/deletion"
 	"github.com/grafana/loki/v3/pkg/util/httpreq"
 	util_log "github.com/grafana/loki/v3/pkg/util/log"
-	mathutil "github.com/grafana/loki/v3/pkg/util/math"
 	server_util "github.com/grafana/loki/v3/pkg/util/server"
 	"github.com/grafana/loki/v3/pkg/validation"
 )
@@ -121,6 +119,9 @@ type instance struct {
 	extractorWrapper     log.SampleExtractorWrapper
 	streamRateCalculator *StreamRateCalculator
 
+	queryMtx sync.Mutex
+	queries  map[uint32]*IngesterQuery
+
 	writeFailures *writefailures.Manager
 
 	schemaconfig *config.SchemaConfig
@@ -170,6 +171,8 @@ func newInstance(
 		wal:                   wal,
 		metrics:               metrics,
 		flushOnShutdownSwitch: flushOnShutdownSwitch,
+
+		queries: map[uint32]*IngesterQuery{},
 
 		chunkFilter:      chunkFilter,
 		pipelineWrapper:  pipelineWrapper,
@@ -1034,91 +1037,6 @@ func parseShardFromRequest(reqShards []string) (*logql.Shard, error) {
 
 func isDone(ctx context.Context) bool {
 	return ctx.Err() != nil
-}
-
-// QuerierQueryServer is the GRPC server stream we use to send batch of entries.
-type QuerierQueryServer interface {
-	Context() context.Context
-	Send(res *logproto.QueryResponse) error
-}
-
-func sendBatches(ctx context.Context, i iter.EntryIterator, queryServer QuerierQueryServer, limit int32) error {
-	stats := stats.FromContext(ctx)
-	metadata := metadata.FromContext(ctx)
-
-	// send until the limit is reached.
-	for limit != 0 && !isDone(ctx) {
-		fetchSize := uint32(queryBatchSize)
-		if limit > 0 {
-			fetchSize = mathutil.MinUint32(queryBatchSize, uint32(limit))
-		}
-		batch, batchSize, err := iter.ReadBatch(i, fetchSize)
-		if err != nil {
-			return err
-		}
-
-		if limit > 0 {
-			limit -= int32(batchSize)
-		}
-
-		stats.AddIngesterBatch(int64(batchSize))
-		batch.Stats = stats.Ingester()
-		batch.Warnings = metadata.Warnings()
-
-		if isDone(ctx) {
-			break
-		}
-		if err := queryServer.Send(batch); err != nil && err != context.Canceled {
-			return err
-		}
-
-		// We check this after sending an empty batch to make sure stats are sent
-		if len(batch.Streams) == 0 {
-			return nil
-		}
-
-		stats.Reset()
-		metadata.Reset()
-	}
-	return nil
-}
-
-func sendSampleBatches(ctx context.Context, it iter.SampleIterator, queryServer logproto.Querier_QuerySampleServer) error {
-	sp := opentracing.SpanFromContext(ctx)
-
-	stats := stats.FromContext(ctx)
-	metadata := metadata.FromContext(ctx)
-	for !isDone(ctx) {
-		batch, size, err := iter.ReadSampleBatch(it, queryBatchSampleSize)
-		if err != nil {
-			return err
-		}
-
-		stats.AddIngesterBatch(int64(size))
-		batch.Stats = stats.Ingester()
-		batch.Warnings = metadata.Warnings()
-
-		if isDone(ctx) {
-			break
-		}
-		if err := queryServer.Send(batch); err != nil && err != context.Canceled {
-			return err
-		}
-
-		// We check this after sending an empty batch to make sure stats are sent
-		if len(batch.Series) == 0 {
-			return nil
-		}
-
-		stats.Reset()
-		metadata.Reset()
-
-		if sp != nil {
-			sp.LogKV("event", "sent batch", "size", size)
-		}
-	}
-
-	return nil
 }
 
 func shouldConsiderStream(stream *stream, reqFrom, reqThrough time.Time) bool {

@@ -12,6 +12,7 @@ option go_package = "github.com/grafana/loki/v3/pkg/logproto";
 
 service Querier {
   rpc Query(QueryRequest) returns (stream QueryResponse) {}
+  rpc Ack(AckRequest) returns (AckResponse) {}
 
   rpc QuerySample(SampleQueryRequest) returns (stream SampleQueryResponse) {}
 
@@ -113,13 +114,20 @@ message Delete {
   int64 end = 3;
 }
 
+message AckRequest {
+  uint32 id = 1;
+}
+
+message AckResponse {}
+
 message QueryResponse {
   repeated StreamAdapter streams = 1 [
     (gogoproto.customtype) = "github.com/grafana/loki/pkg/push.Stream",
     (gogoproto.nullable) = true
   ];
   stats.Ingester stats = 2 [(gogoproto.nullable) = false];
-  repeated string warnings = 3;
+  uint32 id = 3;
+  repeated string warnings = 4;
 }
 
 message SampleQueryResponse {
@@ -128,7 +136,8 @@ message SampleQueryResponse {
     (gogoproto.nullable) = true
   ];
   stats.Ingester stats = 2 [(gogoproto.nullable) = false];
-  repeated string warnings = 3;
+  uint32 id = 3;
+  repeated string warnings = 4;
 }
 
 enum Direction {

@@ -1035,7 +1035,7 @@ func Test_DedupeIngester(t *testing.T) {
 				},
 			})
 			require.NoError(t, err)
-			iterators = append(iterators, iter.NewQueryClientIterator(stream, logproto.BACKWARD))
+			iterators = append(iterators, iter.NewQueryClientIterator(stream, client, logproto.BACKWARD))
 		}
 		it := iter.NewMergeEntryIterator(ctx, iterators, logproto.BACKWARD)
 
@@ -1065,7 +1065,7 @@ func Test_DedupeIngester(t *testing.T) {
 				Direction: logproto.FORWARD,
 			})
 			require.NoError(t, err)
-			iterators = append(iterators, iter.NewQueryClientIterator(stream, logproto.FORWARD))
+			iterators = append(iterators, iter.NewQueryClientIterator(stream, client, logproto.FORWARD))
 		}
 		it := iter.NewMergeEntryIterator(ctx, iterators, logproto.FORWARD)
 
@@ -1096,7 +1096,7 @@ func Test_DedupeIngester(t *testing.T) {
 				},
 			})
 			require.NoError(t, err)
-			iterators = append(iterators, iter.NewSampleQueryClientIterator(stream))
+			iterators = append(iterators, iter.NewSampleQueryClientIterator(stream, client))
 		}
 		it := iter.NewMergeSampleIterator(ctx, iterators)
 		var expectedLabels []string
@@ -1134,7 +1134,7 @@ func Test_DedupeIngester(t *testing.T) {
 				},
 			})
 			require.NoError(t, err)
-			iterators = append(iterators, iter.NewSampleQueryClientIterator(stream))
+			iterators = append(iterators, iter.NewSampleQueryClientIterator(stream, client))
 		}
 		it := iter.NewMergeSampleIterator(ctx, iterators)
 		for i := int64(0); i < requests; i++ {
@@ -1197,7 +1197,7 @@ func Test_DedupeIngesterParser(t *testing.T) {
 				},
 			})
 			require.NoError(t, err)
-			iterators = append(iterators, iter.NewQueryClientIterator(stream, logproto.BACKWARD))
+			iterators = append(iterators, iter.NewQueryClientIterator(stream, client, logproto.BACKWARD))
 		}
 		it := iter.NewMergeEntryIterator(ctx, iterators, logproto.BACKWARD)
 
@@ -1227,7 +1227,7 @@ func Test_DedupeIngesterParser(t *testing.T) {
 				},
 			})
 			require.NoError(t, err)
-			iterators = append(iterators, iter.NewQueryClientIterator(stream, logproto.FORWARD))
+			iterators = append(iterators, iter.NewQueryClientIterator(stream, client, logproto.FORWARD))
 		}
 		it := iter.NewMergeEntryIterator(ctx, iterators, logproto.FORWARD)
 
@@ -1254,7 +1254,7 @@ func Test_DedupeIngesterParser(t *testing.T) {
 				},
 			})
 			require.NoError(t, err)
-			iterators = append(iterators, iter.NewSampleQueryClientIterator(stream))
+			iterators = append(iterators, iter.NewSampleQueryClientIterator(stream, client))
 		}
 		it := iter.NewMergeSampleIterator(ctx, iterators)
 
@@ -1282,7 +1282,7 @@ func Test_DedupeIngesterParser(t *testing.T) {
 				},
 			})
 			require.NoError(t, err)
-			iterators = append(iterators, iter.NewSampleQueryClientIterator(stream))
+			iterators = append(iterators, iter.NewSampleQueryClientIterator(stream, client))
 		}
 		it := iter.NewMergeSampleIterator(ctx, iterators)
 

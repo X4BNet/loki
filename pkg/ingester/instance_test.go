@@ -623,13 +623,16 @@ func Test_Iterator(t *testing.T) {
 	)
 	require.NoError(t, err)
 
+	q := NewIngesterQuery(1, instance)
+
 	// assert the order is preserved.
 	var res *logproto.QueryResponse
 	require.NoError(t,
-		sendBatches(context.TODO(), it,
+		q.SendBatches(context.TODO(), it,
 			fakeQueryServer(
 				func(qr *logproto.QueryResponse) error {
 					res = qr
+					q.ReleaseAck()
 					return nil
 				},
 			),

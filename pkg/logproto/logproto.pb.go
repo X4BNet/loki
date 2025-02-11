@@ -649,6 +649,13 @@ func (m *QueryResponse) GetWarnings() []string {
 	return nil
 }
 
+func (m *QueryResponse) GetId() uint32 {
+	if m != nil {
+		return m.Id
+	}
+	return 0
+}
+
 type SampleQueryResponse struct {
 	Series   []Series       `protobuf:"bytes,1,rep,name=series,proto3,customtype=Series" json:"series,omitempty"`
 	Stats    stats.Ingester `protobuf:"bytes,2,opt,name=stats,proto3" json:"stats"`
@@ -3423,6 +3430,9 @@ func (this *StreamRatesRequest) Equal(that interface{}) bool {
 	} else if this == nil {
 		return false
 	}
+	if this.Id != that1.Id {
+		return false
+	}
 	return true
 }
 func (this *StreamRatesResponse) Equal(that interface{}) bool {
@@ -5288,11 +5298,12 @@ func (this *QueryResponse) GoString() string {
 	if this == nil {
 		return "nil"
 	}
-	s := make([]string, 0, 7)
+	s := make([]string, 0, 8)
 	s = append(s, "&logproto.QueryResponse{")
 	s = append(s, "Streams: "+fmt.Sprintf("%#v", this.Streams)+",\n")
 	s = append(s, "Stats: "+strings.Replace(this.Stats.GoString(), `&`, ``, 1)+",\n")
 	s = append(s, "Warnings: "+fmt.Sprintf("%#v", this.Warnings)+",\n")
+	s = append(s, "Id: "+fmt.Sprintf("%#v", this.Id)+",\n")
 	s = append(s, "}")
 	return strings.Join(s, "")
 }
@@ -5892,6 +5903,7 @@ const _ = grpc.SupportPackageIsVersion4
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://godoc.org/google.golang.org/grpc#ClientConn.NewStream.
 type QuerierClient interface {
 	Query(ctx context.Context, in *QueryRequest, opts ...grpc.CallOption) (Querier_QueryClient, error)
+	Ack(ctx context.Context, in *AckRequest, opts ...grpc.CallOption) (*AckResponse, error)
 	QuerySample(ctx context.Context, in *SampleQueryRequest, opts ...grpc.CallOption) (Querier_QuerySampleClient, error)
 	Label(ctx context.Context, in *LabelRequest, opts ...grpc.CallOption) (*LabelResponse, error)
 	Tail(ctx context.Context, in *TailRequest, opts ...grpc.CallOption) (Querier_TailClient, error)
@@ -5946,6 +5958,15 @@ func (x *querierQueryClient) Recv() (*QueryResponse, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+func (c *querierClient) Ack(ctx context.Context, in *AckRequest, opts ...grpc.CallOption) (*AckResponse, error) {
+	out := new(AckResponse)
+	err := c.cc.Invoke(ctx, "/logproto.Querier/Ack", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *querierClient) QuerySample(ctx context.Context, in *SampleQueryRequest, opts ...grpc.CallOption) (Querier_QuerySampleClient, error) {
@@ -6087,6 +6108,7 @@ func (c *querierClient) GetDetectedLabels(ctx context.Context, in *DetectedLabel
 // QuerierServer is the server API for Querier service.
 type QuerierServer interface {
 	Query(*QueryRequest, Querier_QueryServer) error
+	Ack(context.Context, *AckRequest) (*AckResponse, error)
 	QuerySample(*SampleQueryRequest, Querier_QuerySampleServer) error
 	Label(context.Context, *LabelRequest) (*LabelResponse, error)
 	Tail(*TailRequest, Querier_TailServer) error
@@ -6109,6 +6131,9 @@ type UnimplementedQuerierServer struct {
 
 func (*UnimplementedQuerierServer) Query(req *QueryRequest, srv Querier_QueryServer) error {
 	return status.Errorf(codes.Unimplemented, "method Query not implemented")
+}
+func (*UnimplementedQuerierServer) Ack(ctx context.Context, req *AckRequest) (*AckResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Ack not implemented")
 }
 func (*UnimplementedQuerierServer) QuerySample(req *SampleQueryRequest, srv Querier_QuerySampleServer) error {
 	return status.Errorf(codes.Unimplemented, "method QuerySample not implemented")
@@ -6164,6 +6189,24 @@ type querierQueryServer struct {
 
 func (x *querierQueryServer) Send(m *QueryResponse) error {
 	return x.ServerStream.SendMsg(m)
+}
+
+func _Querier_Ack_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AckRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QuerierServer).Ack(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/logproto.Querier/Ack",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QuerierServer).Ack(ctx, req.(*AckRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _Querier_QuerySample_Handler(srv interface{}, stream grpc.ServerStream) error {
@@ -6356,6 +6399,10 @@ var _Querier_serviceDesc = grpc.ServiceDesc{
 	ServiceName: "logproto.Querier",
 	HandlerType: (*QuerierServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "Ack",
+			Handler:    _Querier_Ack_Handler,
+		},
 		{
 			MethodName: "Label",
 			Handler:    _Querier_Label_Handler,
@@ -8129,6 +8176,11 @@ func (m *GetChunkRefResponse) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 	_ = i
 	var l int
 	_ = l
+	if m.Id != 0 {
+		i = encodeVarintLogproto(dAtA, i, uint64(m.Id))
+		i--
+		dAtA[i] = 0x18
+	}
 	{
 		size, err := m.Stats.MarshalToSizedBuffer(dAtA[:i])
 		if err != nil {
@@ -9724,6 +9776,9 @@ func (m *GetChunkRefResponse) Size() (n int) {
 	}
 	l = m.Stats.Size()
 	n += 1 + l + sovLogproto(uint64(l))
+	if m.Id != 0 {
+		n += 1 + sovLogproto(uint64(m.Id))
+	}
 	return n
 }
 
@@ -10265,6 +10320,7 @@ func (this *SampleQueryResponse) String() string {
 	s := strings.Join([]string{`&SampleQueryResponse{`,
 		`Series:` + fmt.Sprintf("%v", this.Series) + `,`,
 		`Stats:` + strings.Replace(strings.Replace(fmt.Sprintf("%v", this.Stats), "Ingester", "stats.Ingester", 1), `&`, ``, 1) + `,`,
+		`Id:` + fmt.Sprintf("%v", this.Id) + `,`,
 		`Warnings:` + fmt.Sprintf("%v", this.Warnings) + `,`,
 		`}`,
 	}, "")
@@ -11727,6 +11783,25 @@ func (m *QueryRequest) Unmarshal(dAtA []byte) error {
 				return err
 			}
 			iNdEx = postIndex
+		case 3:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Id", wireType)
+			}
+			m.Id = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowLogproto
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Id |= uint32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
 		default:
 			iNdEx = preIndex
 			skippy, err := skipLogproto(dAtA[iNdEx:])
