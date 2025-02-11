@@ -272,9 +272,11 @@ func (i *Ingester) flushLoop(j int) {
 		if op.immediate && err != nil {
 			op.from = op.from.Add(flushBackoff)
 			i.flushQueues[j].Enqueue(op)
-			if strings.HasPrefix(err.Error(), "SlowDown:") {
+			errstr := err.Error()
+			// 3s delay for throttling errors, or 50x errors.
+			if strings.HasPrefix(errstr, "SlowDown:") || strings.Contains(errstr, "status code: 50") {
 				runtime.GC()
-				time.Sleep(time.Second)
+				time.Sleep(time.Second * 3)
 			}
 		}
 
