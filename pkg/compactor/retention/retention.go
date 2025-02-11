@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	strings "strings"
 	"time"
 
 	"github.com/go-kit/log"
@@ -325,6 +326,13 @@ func (s *Sweeper) deleteChunk(ctx context.Context, chunkID []byte) error {
 			level.Debug(util_log.Logger).Log("msg", "delete on not found chunk", "chunkID", chunkIDString)
 			return nil
 		}
+
+		errstr := err.Error()
+		// additional 5s delay for throttling errors, or 50x errors.
+		if strings.HasPrefix(errstr, "SlowDown:") || strings.Contains(errstr, "status code: 50") {
+			time.Sleep(time.Second * 5)
+		}
+
 		retry.Wait()
 	}
 
