@@ -1000,7 +1000,7 @@ func Test_DedupeIngester(t *testing.T) {
 		ctx, _         = user.InjectIntoGRPCRequest(user.InjectOrgID(context.Background(), "foo"))
 	)
 	// make sure we will cut blocks and chunks and use head chunks
-	ingesterConfig.TargetChunkSize = 800
+	ingesterConfig.ChunkTargetSize = 800
 	ingesterConfig.BlockSize = 300
 
 	// created many different ingesters

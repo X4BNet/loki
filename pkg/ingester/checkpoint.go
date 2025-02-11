@@ -100,7 +100,7 @@ func fromWireChunks(conf *Config, headfmt chunkenc.HeadBlockFmt, wireChunks []Ch
 			lastUpdated: c.LastUpdated,
 		}
 
-		mc, err := chunkenc.MemchunkFromCheckpoint(c.Data, c.Head, headfmt, conf.BlockSize, conf.TargetChunkSize)
+		mc, err := chunkenc.MemchunkFromCheckpoint(c.Data, c.Head, headfmt, conf.BlockSize, conf.ChunkTargetSize, conf.ChunkMaxSize, conf.ChunkMinTime)
 		if err != nil {
 			return nil, err
 		}

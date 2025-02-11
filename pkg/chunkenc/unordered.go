@@ -26,9 +26,9 @@ var noopStreamPipeline = log.NewNoopPipeline().ForStream(labels.Labels{})
 type HeadBlock interface {
 	IsEmpty() bool
 	CheckpointTo(w io.Writer) error
-	CheckpointBytes(b []byte) ([]byte, error)
+	CheckpointBytes(*block) ([]byte, error)
 	CheckpointSize() int
-	LoadBytes(b []byte) error
+	LoadBytes(b *block) error
 	Serialise(pool compression.WriterPool) ([]byte, error)
 	Reset()
 	Bounds() (mint, maxt int64)
@@ -482,8 +482,8 @@ func (hb *unorderedHeadBlock) CheckpointSize() int {
 // CheckpointBytes serializes a headblock to []byte. This is used by the WAL checkpointing,
 // which does not want to mutate a chunk by cutting it (otherwise risking content address changes), but
 // needs to serialize/deserialize the data to disk to ensure data durability.
-func (hb *unorderedHeadBlock) CheckpointBytes(b []byte) ([]byte, error) {
-	buf := bytes.NewBuffer(b[:0])
+func (hb *unorderedHeadBlock) CheckpointBytes(b *block) ([]byte, error) {
+	buf := bytes.NewBuffer(b.b[:0])
 	err := hb.CheckpointTo(buf)
 	return buf.Bytes(), err
 }
@@ -555,15 +555,15 @@ func (hb *unorderedHeadBlock) CheckpointTo(w io.Writer) error {
 	return nil
 }
 
-func (hb *unorderedHeadBlock) LoadBytes(b []byte) error {
+func (hb *unorderedHeadBlock) LoadBytes(b *block) error {
 	// ensure it's empty
 	*hb = *newUnorderedHeadBlock(hb.format, hb.symbolizer)
 
-	if len(b) < 1 {
+	if len(b.b) < 1 {
 		return nil
 	}
 
-	db := decbuf{b: b}
+	db := decbuf{b: b.b}
 
 	version := db.byte()
 	if db.err() != nil {
@@ -630,7 +630,8 @@ func HeadFromCheckpoint(b []byte, desiredIfNotUnordered HeadBlockFmt, symbolizer
 	}
 
 	decodedBlock := format.NewBlock(symbolizer)
-	if err := decodedBlock.LoadBytes(b); err != nil {
+	blk := &block{b: b}
+	if err := decodedBlock.LoadBytes(blk); err != nil {
 		return nil, err
 	}
 

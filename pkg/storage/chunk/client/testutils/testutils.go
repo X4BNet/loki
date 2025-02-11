@@ -87,7 +87,7 @@ func CreateChunks(scfg config.SchemaConfig, startIndex, batchSize int, from mode
 }
 
 func DummyChunkFor(from, through model.Time, metric labels.Labels) chunk.Chunk {
-	cs := chunkenc.NewMemChunk(chunkenc.ChunkFormatV4, compression.GZIP, chunkenc.UnorderedWithStructuredMetadataHeadBlockFmt, 256*1024, 0)
+	cs := chunkenc.NewMemChunk(chunkenc.ChunkFormatV4, compression.GZIP, chunkenc.UnorderedWithStructuredMetadataHeadBlockFmt, 256*1024, 0, 0, time.Minute)
 
 	for ts := from; ts <= through; ts = ts.Add(15 * time.Second) {
 		_, err := cs.Append(&logproto.Entry{Timestamp: ts.Time(), Line: fmt.Sprintf("line ts=%d", ts)})
@@ -100,7 +100,7 @@ func DummyChunkFor(from, through model.Time, metric labels.Labels) chunk.Chunk {
 		userID,
 		client.Fingerprint(metric),
 		metric,
-		chunkenc.NewFacade(cs, 0, 0),
+		chunkenc.NewFacade(cs, 0, 0, 0, time.Minute),
 		from,
 		through,
 	)

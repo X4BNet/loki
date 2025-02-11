@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"runtime"
+	strings "strings"
 	"sync"
 	"time"
 
@@ -141,6 +143,7 @@ func (i *Ingester) flush(mayRemoveStreams bool) {
 func (i *Ingester) FlushHandler(w http.ResponseWriter, _ *http.Request) {
 	i.sweepUsers(true, true)
 	w.WriteHeader(http.StatusNoContent)
+	runtime.GC()
 }
 
 type flushOp struct {
@@ -169,27 +172,41 @@ func (i *Ingester) sweepUsers(immediate, mayRemoveStreams bool) {
 }
 
 func (i *Ingester) sweepInstance(instance *instance, immediate, mayRemoveStreams bool) {
+	flushCount := 0
 	_ = instance.streams.ForEach(func(s *stream) (bool, error) {
 		if !immediate {
 			time.Sleep(time.Second)
 		}
-		i.sweepStream(instance, s, immediate)
+		flushed := i.sweepStream(instance, s, immediate)
 		i.removeFlushedChunks(instance, s, mayRemoveStreams)
+		if flushed {
+			flushCount++
+			if flushCount > 50 {
+				flushQueueIndex := int(uint64(s.fp) % uint64(i.cfg.ConcurrentFlushes))
+				for {
+					time.Sleep(time.Second)
+					if i.flushQueues[flushQueueIndex].Length() < 2 {
+						break
+					}
+				}
+				flushCount = 0
+			}
+		}
 		return true, nil
 	})
 }
 
-func (i *Ingester) sweepStream(instance *instance, stream *stream, immediate bool) {
+func (i *Ingester) sweepStream(instance *instance, stream *stream, immediate bool) bool {
 	stream.chunkMtx.RLock()
 	defer stream.chunkMtx.RUnlock()
 	if len(stream.chunks) == 0 {
-		return
+		return false
 	}
 
 	lastChunk := stream.chunks[len(stream.chunks)-1]
 	shouldFlush, _ := i.shouldFlushChunk(&lastChunk)
 	if len(stream.chunks) == 1 && !immediate && !shouldFlush && !instance.ownedStreamsSvc.isStreamNotOwned(stream.fp) {
-		return
+		return false
 	}
 
 	flushQueueIndex := int(uint64(stream.fp) % uint64(i.cfg.ConcurrentFlushes))
@@ -204,6 +221,8 @@ func (i *Ingester) sweepStream(instance *instance, stream *stream, immediate boo
 	if flushQueue.Length() > 100 && !immediate {
 		time.Sleep(time.Second)
 	}
+
+	return true
 }
 
 // Compute a rate such to spread calls to the store over nearly all of the flush period,
@@ -253,7 +272,13 @@ func (i *Ingester) flushLoop(j int) {
 		if op.immediate && err != nil {
 			op.from = op.from.Add(flushBackoff)
 			i.flushQueues[j].Enqueue(op)
+			if strings.HasPrefix(err.Error(), "SlowDown:") {
+				runtime.GC()
+				time.Sleep(time.Second)
+			}
 		}
+
+		runtime.GC()
 	}
 }
 
@@ -336,25 +361,32 @@ func (i *Ingester) collectChunksToFlush(instance *instance, fp model.Fingerprint
 	defer stream.chunkMtx.Unlock()
 	notOwnedStream := instance.ownedStreamsSvc.isStreamNotOwned(fp)
 
+	now := time.Now()
 	var result []*chunkDesc
 	for j := range stream.chunks {
-		shouldFlush, reason := i.shouldFlushChunk(&stream.chunks[j])
+		c := &stream.chunks[j]
+		shouldFlush, reason := i.shouldFlushChunk(c)
 		if !shouldFlush && notOwnedStream {
 			shouldFlush, reason = true, flushReasonNotOwned
 		}
 		if immediate || shouldFlush {
 			// Ensure no more writes happen to this chunk.
-			if !stream.chunks[j].closed {
-				stream.chunks[j].closed = true
+			if !c.closed {
+				c.closed = true
 			}
 			// Flush this chunk if it hasn't already been successfully flushed.
-			if stream.chunks[j].flushed.IsZero() {
+			if c.flushed.IsZero() {
 				if immediate {
 					reason = flushReasonForced
 				}
-				stream.chunks[j].reason = reason
+				c.reason = reason
 
-				result = append(result, &stream.chunks[j])
+				result = append(result, c)
+			}
+		} else {
+			shouldFlush := now.Sub(c.lastUpdated) > i.cfg.MaxBlockIdle && c.chunk.HeadSize() >= i.cfg.MinBlockIdleSize
+			if shouldFlush {
+				c.chunk.Cut()
 			}
 		}
 	}
@@ -444,7 +476,7 @@ func (i *Ingester) flushChunks(ctx context.Context, fp model.Fingerprint, labelP
 		firstTime, lastTime := util.RoundToMilliseconds(c.chunk.Bounds())
 		ch := chunk.NewChunk(
 			userID, fp, metric,
-			chunkenc.NewFacade(c.chunk, i.cfg.BlockSize, i.cfg.TargetChunkSize),
+			chunkenc.NewFacade(c.chunk, i.cfg.BlockSize, i.cfg.ChunkTargetSize, i.cfg.ChunkMaxSize, i.cfg.ChunkMinTime),
 			firstTime,
 			lastTime,
 		)
@@ -455,6 +487,9 @@ func (i *Ingester) flushChunks(ctx context.Context, fp model.Fingerprint, labelP
 		}
 
 		if err := i.flushChunk(ctx, &ch); err != nil {
+			// If the flush fails, we need to page out the blocks in the chunk.
+			c.chunk.Pageout()
+
 			return err
 		}
 

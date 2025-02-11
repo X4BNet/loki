@@ -61,7 +61,7 @@ type Chunk interface {
 	// Size returns the number of entries in a chunk
 	Size() int
 	Bytes() ([]byte, error)
-	BytesWith([]byte) ([]byte, error) // uses provided []byte for buffer instantiation
+	BytesWith(*block) ([]byte, error) // uses provided []byte for buffer instantiation
 	io.WriterTo
 	BlockCount() int
 	Utilization() float64

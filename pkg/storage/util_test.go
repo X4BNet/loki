@@ -109,12 +109,12 @@ func newChunk(chunkFormat byte, headBlockFmt chunkenc.HeadBlockFmt, stream logpr
 		lbs = builder.Labels()
 	}
 	from, through := loki_util.RoundToMilliseconds(stream.Entries[0].Timestamp, stream.Entries[len(stream.Entries)-1].Timestamp)
-	chk := chunkenc.NewMemChunk(chunkFormat, compression.GZIP, headBlockFmt, 256*1024, 0)
+	chk := chunkenc.NewMemChunk(chunkFormat, compression.GZIP, headBlockFmt, 256*1024, 0, 0, 0, time.Minute)
 	for _, e := range stream.Entries {
 		_, _ = chk.Append(&e)
 	}
 	chk.Close()
-	c := chunk.NewChunk("fake", client.Fingerprint(lbs), lbs, chunkenc.NewFacade(chk, 0, 0), from, through)
+	c := chunk.NewChunk("fake", client.Fingerprint(lbs), lbs, chunkenc.NewFacade(chk, 0, 0, 0, time.Minute), from, through)
 	// force the checksum creation
 	if err := c.Encode(); err != nil {
 		panic(err)

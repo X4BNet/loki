@@ -95,8 +95,12 @@ type Config struct {
 	FlushOpTimeout      time.Duration     `yaml:"flush_op_timeout"`
 	RetainPeriod        time.Duration     `yaml:"chunk_retain_period"`
 	MaxChunkIdle        time.Duration     `yaml:"chunk_idle_period"`
+	MaxBlockIdle        time.Duration     `yaml:"block_idle_period"`
+	MinBlockIdleSize    int               `yaml:"block_idle_size"`
 	BlockSize           int               `yaml:"chunk_block_size"`
-	TargetChunkSize     int               `yaml:"chunk_target_size"`
+	ChunkTargetSize     int               `yaml:"chunk_target_size"`
+	ChunkMaxSize        int               `yaml:"chunk_max_size"`
+	ChunkMinTime        time.Duration     `yaml:"chunk_min_time"`
 	ChunkEncoding       string            `yaml:"chunk_encoding"`
 	parsedEncoding      compression.Codec `yaml:"-"` // placeholder for validated encoding
 	MaxChunkAge         time.Duration     `yaml:"max_chunk_age"`
@@ -148,9 +152,13 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 	f.DurationVar(&cfg.FlushOpTimeout, "ingester.flush-op-timeout", 10*time.Minute, "The timeout for an individual flush. Will be retried up to `flush-op-backoff-retries` times.")
 	f.DurationVar(&cfg.RetainPeriod, "ingester.chunks-retain-period", 0, "How long chunks should be retained in-memory after they've been flushed.")
 	f.DurationVar(&cfg.MaxChunkIdle, "ingester.chunks-idle-period", 30*time.Minute, "How long chunks should sit in-memory with no updates before being flushed if they don't hit the max block size. This means that half-empty chunks will still be flushed after a certain period as long as they receive no further activity.")
+	f.DurationVar(&cfg.MaxBlockIdle, "ingester.block-idle-period", 1*time.Hour, "")
+	f.IntVar(&cfg.MinBlockIdleSize, "ingester.block-idle-size", 128*1024, "")
 	f.IntVar(&cfg.BlockSize, "ingester.chunks-block-size", 256*1024, "The targeted _uncompressed_ size in bytes of a chunk block When this threshold is exceeded the head block will be cut and compressed inside the chunk.")
-	f.IntVar(&cfg.TargetChunkSize, "ingester.chunk-target-size", 1572864, "A target _compressed_ size in bytes for chunks. This is a desired size not an exact size, chunks may be slightly bigger or significantly smaller if they get flushed for other reasons (e.g. chunk_idle_period). A value of 0 creates chunks with a fixed 10 blocks, a non zero value will create chunks with a variable number of blocks to meet the target size.") // 1.5 MB
+	f.IntVar(&cfg.ChunkTargetSize, "ingester.chunk-target-size", 1572864, "") // 1.5 MB
 	f.StringVar(&cfg.ChunkEncoding, "ingester.chunk-encoding", compression.GZIP.String(), fmt.Sprintf("The algorithm to use for compressing chunk. (%s)", compression.SupportedCodecs()))
+	f.IntVar(&cfg.ChunkMaxSize, "ingester.chunk-max-size", 1572864, "") // 1.5 MB
+	f.DurationVar(&cfg.ChunkMinTime, "ingester.chunk-min-time", 10*time.Minute, "")
 	f.DurationVar(&cfg.SyncPeriod, "ingester.sync-period", 1*time.Hour, "Parameters used to synchronize ingesters to cut chunks at the same moment. Sync period is used to roll over incoming entry to a new chunk. If chunk's utilization isn't high enough (eg. less than 50% when sync_min_utilization is set to 0.5), then this chunk rollover doesn't happen.")
 	f.Float64Var(&cfg.SyncMinUtilization, "ingester.sync-min-utilization", 0.1, "Minimum utilization of chunk when doing synchronization.")
 	f.IntVar(&cfg.MaxReturnedErrors, "ingester.max-ignored-stream-errors", 10, "The maximum number of errors a stream will report to the user when a push fails. 0 to make unlimited.")
@@ -305,7 +313,7 @@ func New(cfg Config, clientConfig client.Config, store Store, limits Limits, con
 		cfg.ingesterClientFactory = client.New
 	}
 	compressionStats.Set(cfg.ChunkEncoding)
-	targetSizeStats.Set(int64(cfg.TargetChunkSize))
+	targetSizeStats.Set(int64(cfg.ChunkTargetSize))
 	walStats.Set("disabled")
 	if cfg.WAL.Enabled {
 		walStats.Set("enabled")
@@ -1047,7 +1055,7 @@ func (i *Ingester) Ack(ctx context.Context, req *logproto.AckRequest) (*logproto
 		return &logproto.AckResponse{}, err
 	}
 
-	instance := i.GetOrCreateInstance(instanceID)
+	instance, err := i.GetOrCreateInstance(instanceID)
 	if err != nil {
 		return &logproto.AckResponse{}, err
 	}

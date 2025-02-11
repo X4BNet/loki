@@ -708,6 +708,13 @@ func (m *SampleQueryResponse) GetWarnings() []string {
 	return nil
 }
 
+func (m *SampleQueryResponse) GetId() uint32 {
+	if m != nil {
+		return m.Id
+	}
+	return 0
+}
+
 type LabelRequest struct {
 	Name   string     `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Values bool       `protobuf:"varint,2,opt,name=values,proto3" json:"values,omitempty"`
@@ -3118,6 +3125,8 @@ func init() {
 	proto.RegisterType((*SampleQueryRequest)(nil), "logproto.SampleQueryRequest")
 	proto.RegisterType((*Plan)(nil), "logproto.Plan")
 	proto.RegisterType((*Delete)(nil), "logproto.Delete")
+	proto.RegisterType((*AckRequest)(nil), "logproto.AckRequest")
+	proto.RegisterType((*AckResponse)(nil), "logproto.AckResponse")
 	proto.RegisterType((*QueryResponse)(nil), "logproto.QueryResponse")
 	proto.RegisterType((*SampleQueryResponse)(nil), "logproto.SampleQueryResponse")
 	proto.RegisterType((*LabelRequest)(nil), "logproto.LabelRequest")
@@ -3672,6 +3681,51 @@ func (this *Delete) Equal(that interface{}) bool {
 	}
 	return true
 }
+func (this *AckRequest) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*AckRequest)
+	if !ok {
+		that2, ok := that.(AckRequest)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if this.Id != that1.Id {
+		return false
+	}
+	return true
+}
+func (this *AckResponse) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*AckResponse)
+	if !ok {
+		that2, ok := that.(AckResponse)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	return true
+}
 func (this *QueryResponse) Equal(that interface{}) bool {
 	if that == nil {
 		return this == nil
@@ -3792,6 +3846,9 @@ func (this *LabelRequest) Equal(that interface{}) bool {
 		return false
 	}
 	if this.Query != that1.Query {
+		return false
+	}
+	if this.Id != that1.Id {
 		return false
 	}
 	return true
@@ -5291,6 +5348,25 @@ func (this *Delete) GoString() string {
 	s = append(s, "Selector: "+fmt.Sprintf("%#v", this.Selector)+",\n")
 	s = append(s, "Start: "+fmt.Sprintf("%#v", this.Start)+",\n")
 	s = append(s, "End: "+fmt.Sprintf("%#v", this.End)+",\n")
+	s = append(s, "}")
+	return strings.Join(s, "")
+}
+func (this *AckRequest) GoString() string {
+	if this == nil {
+		return "nil"
+	}
+	s := make([]string, 0, 5)
+	s = append(s, "&logproto.AckRequest{")
+	s = append(s, "Id: "+fmt.Sprintf("%#v", this.Id)+",\n")
+	s = append(s, "}")
+	return strings.Join(s, "")
+}
+func (this *AckResponse) GoString() string {
+	if this == nil {
+		return "nil"
+	}
+	s := make([]string, 0, 4)
+	s = append(s, "&logproto.AckResponse{")
 	s = append(s, "}")
 	return strings.Join(s, "")
 }
@@ -6985,6 +7061,57 @@ func (m *Delete) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 	return len(dAtA) - i, nil
 }
 
+func (m *AckRequest) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *AckRequest) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *AckRequest) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.Id != 0 {
+		i = encodeVarintLogproto(dAtA, i, uint64(m.Id))
+		i--
+		dAtA[i] = 0x8
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *AckResponse) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *AckResponse) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *AckResponse) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	return len(dAtA) - i, nil
+}
+
 func (m *QueryResponse) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
@@ -8112,6 +8239,11 @@ func (m *GetChunkRefRequest) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 	_ = i
 	var l int
 	_ = l
+	if m.Id != 0 {
+		i = encodeVarintLogproto(dAtA, i, uint64(m.Id))
+		i--
+		dAtA[i] = 0x18
+	}
 	{
 		size := m.Plan.Size()
 		i -= size
@@ -9255,6 +9387,27 @@ func (m *Delete) Size() (n int) {
 	return n
 }
 
+func (m *AckRequest) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	if m.Id != 0 {
+		n += 1 + sovLogproto(uint64(m.Id))
+	}
+	return n
+}
+
+func (m *AckResponse) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	return n
+}
+
 func (m *QueryResponse) Size() (n int) {
 	if m == nil {
 		return 0
@@ -9614,6 +9767,9 @@ func (m *GetChunkIDsRequest) Size() (n int) {
 	n += 1 + l + sovLogproto(uint64(l))
 	l = github_com_gogo_protobuf_types.SizeOfStdTime(m.End)
 	n += 1 + l + sovLogproto(uint64(l))
+	if m.Id != 0 {
+		n += 1 + sovLogproto(uint64(m.Id))
+	}
 	return n
 }
 
@@ -10297,6 +10453,25 @@ func (this *Delete) String() string {
 		`Selector:` + fmt.Sprintf("%v", this.Selector) + `,`,
 		`Start:` + fmt.Sprintf("%v", this.Start) + `,`,
 		`End:` + fmt.Sprintf("%v", this.End) + `,`,
+		`}`,
+	}, "")
+	return s
+}
+func (this *AckRequest) String() string {
+	if this == nil {
+		return "nil"
+	}
+	s := strings.Join([]string{`&AckRequest{`,
+		`Id:` + fmt.Sprintf("%v", this.Id) + `,`,
+		`}`,
+	}, "")
+	return s
+}
+func (this *AckResponse) String() string {
+	if this == nil {
+		return "nil"
+	}
+	s := strings.Join([]string{`&AckResponse{`,
 		`}`,
 	}, "")
 	return s
@@ -11783,25 +11958,6 @@ func (m *QueryRequest) Unmarshal(dAtA []byte) error {
 				return err
 			}
 			iNdEx = postIndex
-		case 3:
-			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Id", wireType)
-			}
-			m.Id = 0
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowLogproto
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				m.Id |= uint32(b&0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
 		default:
 			iNdEx = preIndex
 			skippy, err := skipLogproto(dAtA[iNdEx:])
@@ -12301,6 +12457,131 @@ func (m *Delete) Unmarshal(dAtA []byte) error {
 					break
 				}
 			}
+		default:
+			iNdEx = preIndex
+			skippy, err := skipLogproto(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthLogproto
+			}
+			if (iNdEx + skippy) < 0 {
+				return ErrInvalidLengthLogproto
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *AckRequest) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowLogproto
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: AckRequest: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: AckRequest: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Id", wireType)
+			}
+			m.Id = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowLogproto
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Id |= uint32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		default:
+			iNdEx = preIndex
+			skippy, err := skipLogproto(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthLogproto
+			}
+			if (iNdEx + skippy) < 0 {
+				return ErrInvalidLengthLogproto
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *AckResponse) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowLogproto
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: AckResponse: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: AckResponse: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
 		default:
 			iNdEx = preIndex
 			skippy, err := skipLogproto(dAtA[iNdEx:])
@@ -13414,6 +13695,25 @@ func (m *TailRequest) Unmarshal(dAtA []byte) error {
 				return err
 			}
 			iNdEx = postIndex
+		case 3:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Id", wireType)
+			}
+			m.Id = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowLogproto
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Id |= uint32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
 		default:
 			iNdEx = preIndex
 			skippy, err := skipLogproto(dAtA[iNdEx:])
@@ -13537,6 +13837,25 @@ func (m *TailResponse) Unmarshal(dAtA []byte) error {
 				return err
 			}
 			iNdEx = postIndex
+		case 3:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Id", wireType)
+			}
+			m.Id = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowLogproto
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Id |= uint32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
 		default:
 			iNdEx = preIndex
 			skippy, err := skipLogproto(dAtA[iNdEx:])

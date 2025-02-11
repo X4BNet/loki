@@ -141,7 +141,7 @@ func newStream(
 // Must hold chunkMtx
 // DEPRECATED: chunk transfers are no longer suggested and remain for compatibility.
 func (s *stream) consumeChunk(_ context.Context, chunk *logproto.Chunk) error {
-	c, err := chunkenc.NewByteChunk(chunk.Data, s.cfg.BlockSize, s.cfg.TargetChunkSize)
+	c, err := chunkenc.NewByteChunk(chunk.Data, s.cfg.BlockSize, s.cfg.ChunkTargetSize, s.cfg.ChunkMaxSize, s.cfg.ChunkMinTime)
 	if err != nil {
 		return err
 	}
@@ -170,7 +170,7 @@ func (s *stream) setChunks(chunks []Chunk) (bytesAdded, entriesAdded int, err er
 }
 
 func (s *stream) NewChunk() *chunkenc.MemChunk {
-	return chunkenc.NewMemChunk(s.chunkFormat, s.cfg.parsedEncoding, s.chunkHeadBlockFormat, s.cfg.BlockSize, s.cfg.TargetChunkSize)
+	return chunkenc.NewMemChunk(s.chunkFormat, s.cfg.parsedEncoding, s.chunkHeadBlockFormat, s.cfg.BlockSize, s.cfg.ChunkTargetSize, s.cfg.ChunkMaxSize, s.cfg.ChunkMinTime)
 }
 
 func (s *stream) Push(

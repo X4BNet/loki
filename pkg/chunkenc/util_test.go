@@ -31,7 +31,7 @@ func generateData(enc compression.Codec, chunksCount, blockSize, targetSize int)
 
 	for n := 0; n < chunksCount; n++ {
 		entry := logprotoEntry(0, testdata.LogString(0))
-		c := NewMemChunk(ChunkFormatV4, enc, UnorderedWithStructuredMetadataHeadBlockFmt, blockSize, targetSize)
+		c := NewMemChunk(ChunkFormatV4, enc, UnorderedWithStructuredMetadataHeadBlockFmt, blockSize, targetSize, targetSize, time.Minute)
 		for c.SpaceFor(entry) {
 			size += uint64(len(entry.Line))
 			_, _ = c.Append(entry)
